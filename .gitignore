@@ -1,0 +1,32 @@
+# 数据目录（GDB 源文件、GeoJSON、db）
+data/
+
+# SQLite 数据库与备份（含运行时 WAL/SHM）
+*.db
+*.db-shm
+*.db-wal
+*.bak
+*.bak*
+*survey.db*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# 本地密钥
+.secret_key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 测试产物
+.pytest_cache/
+.workbuddy/

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>林业应用平台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">林业应用平台</div>
+  <div class="user">
+    {% if logged_in %}
+      <span class="user-name">已登录：{{ user.display_name or user.username }}</span>
+      <a class="btn-ghost" href="/forest/logout">退出</a>
+    {% else %}
+      <a class="btn-primary" href="{{ login_url }}">登录</a>
+    {% endif %}
+  </div>
+</header>
+
+<main class="container">
+  {% if not logged_in %}
+    <section class="login-prompt">
+      <h1>欢迎</h1>
+      <p>请登录后查看可用应用。</p>
+      <a class="btn-primary lg" href="{{ login_url }}">前往登录</a>
+    </section>
+  {% else %}
+    <h1 class="page-title">应用菜单</h1>
+    {% if requested_code %}
+    <div class="notice">
+      {% set req_app = apps | selectattr('code', 'equalto', requested_code) | first %}
+      {% if req_app and req_app.has_access %}
+        <span class="notice-ok">您请求的程序「{{ req_app.name }}」已就绪，请点击下方卡片进入。</span>
+      {% elif req_app %}
+        <span class="notice-deny">您没有使用「{{ req_app.name }}」的权限。请联系管理员申请授权。</span>
+      {% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+
+  {% if apps %}
+  <div class="grid">
+    {% for a in apps %}
+    {% set is_requested = (a.code == requested_code) %}
+    {% if logged_in and a.has_access %}
+    <a class="card {{ 'card-requested-ok' if is_requested else '' }}" href="{{ a.base_path }}">
+      <div class="card-name">{{ a.name }}</div>
+      <div class="card-code">{{ a.code }}</div>
+      {% if a.description %}<div class="card-desc">{{ a.description }}</div>{% endif %}
+      {% if is_requested %}<div class="card-badge badge-ok">点击进入</div>{% endif %}
+    </a>
+    {% elif logged_in and not a.has_access %}
+    <div class="card card-denied {{ 'card-requested-deny' if is_requested else '' }}">
+      <div class="card-name">{{ a.name }}</div>
+      <div class="card-code">{{ a.code }}</div>
+      {% if a.description %}<div class="card-desc">{{ a.description }}</div>{% endif %}
+      <div class="card-badge badge-deny">无权限</div>
+    </div>
+    {% else %}
+    <a class="card card-locked" href="{{ login_url }}">
+      <div class="card-name">{{ a.name }}</div>
+      <div class="card-code">{{ a.code }}</div>
+      {% if a.description %}<div class="card-desc">{{ a.description }}</div>{% endif %}
+      <div class="card-badge badge-locked">登录后可用</div>
+    </a>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% elif logged_in %}
+  <p class="empty">暂无可见应用。请联系管理员授权。</p>
+  {% endif %}
+</main>
+
+<footer class="footer">林业应用平台 · 统一入口</footer>
+</body>
+</html>

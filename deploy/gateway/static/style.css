@@ -1,0 +1,67 @@
+:root{
+  --brand:#1e3a5f; --brand-2:#2a5d8f;
+  --bg:#f5f7fa; --surface:#ffffff; --border:#e4e7ec;
+  --text:#1c2330; --muted:#6b7280;
+  --radius:12px;
+  --green:#16a34a; --green-bg:#dcfce7; --green-border:#86efac;
+  --red:#c5283d; --red-bg:#fee2e2; --red-border:#fca5a5;
+  --amber:#d97706; --amber-bg:#fef3c7;
+}
+*{box-sizing:border-box;}
+body{margin:0;font-family:-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif;
+  background:var(--bg);color:var(--text);}
+.topbar{display:flex;justify-content:space-between;align-items:center;
+  padding:14px 24px;background:var(--brand);color:#fff;}
+.brand{font-size:18px;font-weight:600;}
+.user{display:flex;align-items:center;gap:12px;}
+.user-name{font-size:14px;opacity:.9;}
+.btn-primary{display:inline-block;padding:8px 18px;border-radius:999px;
+  background:#fff;color:var(--brand);text-decoration:none;font-size:14px;font-weight:600;}
+.btn-primary.lg{padding:12px 28px;font-size:16px;}
+.btn-ghost{color:#fff;text-decoration:none;font-size:14px;opacity:.9;border:1px solid rgba(255,255,255,.5);padding:6px 14px;border-radius:999px;}
+.container{max-width:1080px;margin:32px auto;padding:0 24px;}
+.page-title{font-size:22px;margin:8px 0 20px;}
+.login-prompt{text-align:center;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:56px 24px;}
+.login-prompt h1{margin:0 0 8px;font-size:26px;}
+.login-prompt p{color:var(--muted);margin:0 0 24px;}
+
+/* 提示条 */
+.notice{padding:12px 18px;border-radius:8px;margin-bottom:20px;font-size:14px;}
+.notice-ok{color:var(--green);background:var(--green-bg);border:1px solid var(--green-border);}
+.notice-deny{color:var(--red);background:var(--red-bg);border:1px solid var(--red-border);}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;}
+.card{display:block;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:20px;text-decoration:none;color:var(--text);
+  transition:transform .12s,box-shadow .12s;position:relative;}
+.card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(30,58,95,.12);
+  border-color:var(--brand-2);}
+.card-name{font-size:16px;font-weight:600;margin-bottom:4px;}
+.card-code{font-size:12px;color:var(--muted);margin-bottom:8px;}
+.card-desc{font-size:13px;color:var(--muted);}
+
+/* 有权限 + 请求的应用：绿色高亮 */
+.card-requested-ok{border:2px solid var(--green);background:var(--green-bg);}
+.card-requested-ok:hover{border-color:var(--green);box-shadow:0 6px 18px rgba(22,163,74,.2);}
+
+/* 无权限应用：灰显 */
+.card-denied{opacity:.6;cursor:not-allowed;border-style:dashed;}
+.card-denied:hover{transform:none;box-shadow:none;border-color:var(--border);}
+
+/* 无权限 + 请求的应用：红色高亮 */
+.card-requested-deny{opacity:1;border:2px solid var(--red);background:var(--red-bg);}
+.card-requested-deny .card-name{color:var(--red);}
+
+/* 未登录应用卡片 */
+.card-locked{opacity:.7;}
+
+/* 角标 */
+.card-badge{position:absolute;top:12px;right:12px;font-size:11px;font-weight:600;
+  padding:2px 8px;border-radius:999px;}
+.badge-ok{background:var(--green);color:#fff;}
+.badge-deny{background:var(--red);color:#fff;}
+.badge-locked{background:var(--muted);color:#fff;}
+
+.empty{color:var(--muted);text-align:center;padding:48px 0;}
+.footer{text-align:center;color:var(--muted);font-size:12px;padding:24px;}
