@@ -1,0 +1,16 @@
+{
+  "name": "hqz-survey-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "林业野外调查系统 — User 端 Android 壳（Capacitor，WebView 指向线上后端）",
+  "scripts": {
+    "build": "echo \"no web build step; web served from remote server\""
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0"
+  }
+}

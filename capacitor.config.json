@@ -1,0 +1,9 @@
+{
+  "appId": "top.bibook.survey",
+  "appName": "林业调查",
+  "webDir": "www",
+  "server": {
+    "url": "https://forest.bibook.top/survey",
+    "cleartext": false
+  }
+}

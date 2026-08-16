@@ -30,3 +30,7 @@ venv/
 # 测试产物
 .pytest_cache/
 .workbuddy/
+
+# Capacitor / Android（云端 CI 生成，不提交本地）
+node_modules/
+android/
