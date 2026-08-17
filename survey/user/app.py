@@ -55,6 +55,17 @@ app.config['FOREST_DB'] = FOREST_DB
 _login_required = A.login_required(FOREST_DB, LOCAL_DEV, LOCAL_USER)
 
 
+@app.after_request
+def _api_no_store(resp):
+    """API 响应禁用 HTTP 缓存：防止 APP WebView 缓存 api/me 等，
+    换账号重新登录后仍显示/使用前一个用户的数据。"""
+    if request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.errorhandler(413)
 def _payload_too_large(_e):
     return jsonify({"error": "文件过大"}), 413
@@ -126,16 +137,12 @@ def api_schema_extras():
     return jsonify({"fields": S.SUBCOMPARTMENT_EXTRA_FIELDS})
 
 
-# ── 项目（只看自己的）──
+# ── 项目（登录后全部可见，不按成员限制）──
 
 @app.route("/api/projects")
 @_login_required
 def api_projects():
-    u = A.current_user(FOREST_DB, LOCAL_DEV, LOCAL_USER)
-    if u.get("is_admin"):
-        projects = storage.list_projects()
-    else:
-        projects = storage.list_user_projects(u["id"])
+    projects = storage.list_projects()
     return jsonify({"projects": projects})
 
 

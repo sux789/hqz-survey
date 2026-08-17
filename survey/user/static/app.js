@@ -161,9 +161,9 @@ function handleGeoError(err) {
   toast('定位失败：' + (err && err.message ? err.message : '未知错误'), 2500);
 }
 
-// 统一 fetch 封装：401 自动跳转登录页
+// 统一 fetch 封装：401 自动跳转登录页；禁缓存防止换账号后读到旧用户数据
 async function apiFetch(url, options) {
-  const res = await fetch(url, options);
+  const res = await fetch(url, Object.assign({ cache: 'no-store' }, options));
   if (res.status === 401) {
     window.location.href = '/forest/login?next=/survey/';
     throw new Error('未登录，正在跳转登录页…');

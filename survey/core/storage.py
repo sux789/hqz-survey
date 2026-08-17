@@ -278,7 +278,11 @@ def init_db():
                        SET subcompartment = MAX(0, COALESCE(CAST(subcompartment AS INTEGER), 0));
                     UPDATE subcompartment_rows
                        SET subcompartment_label =
-                           CAST(forest_compartment AS INTEGER) || '-' || CAST(subcompartment AS INTEGER);
+                           CASE WHEN forest_compartment > 0
+                                THEN CAST(forest_compartment AS INTEGER) || '-' ||
+                                     CAST(subcompartment AS INTEGER)
+                                ELSE CAST(subcompartment AS INTEGER)
+                           END;
                 """)
             # 项目名称索引（按项目名称导出/调查筛选用）
             conn.execute(
