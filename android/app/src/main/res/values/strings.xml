@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">宏芊紫验收APP</string>
-    <string name="title_activity_main">宏芊紫验收APP</string>
+    <string name="app_name">验收APP</string>
+    <string name="title_activity_main">验收APP</string>
     <string name="package_name">top.bibook.survey</string>
     <string name="custom_url_scheme">top.bibook.survey</string>
 </resources>

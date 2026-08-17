@@ -58,8 +58,8 @@ jobs:
           APK=android/app/build/outputs/apk/debug/app-debug.apk
           gh release delete latest --cleanup-tag -y || true
           gh release create latest "$APK" \
-            --title "宏芊紫验收APP（最新构建）" \
-            --notes "推送/手动触发自动构建。启动预申请定位/相机权限，按功能提示权限；仅限APP内运行（浏览器拦截）；加载页显示「宏芊紫验收APP」。下载 app-debug.apk 直接安装。" \
+            --title "验收APP（最新构建）" \
+            --notes "推送/手动触发自动构建。启动预申请定位/相机权限，按功能提示权限；仅限APP内运行（浏览器拦截）；加载页显示「验收APP」。下载 app-debug.apk 直接安装。" \
             --prerelease
 
       - name: Write download link to summary
