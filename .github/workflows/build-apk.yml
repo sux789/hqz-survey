@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,17 +37,35 @@ jobs:
       - name: Install Capacitor deps
         run: npm install
 
-      - name: Add & sync Android platform
-        run: |
-          test -d android || npx cap add android
-          npx cap sync android
+      - name: Sync Android platform (uses committed android/ project)
+        run: npx cap sync android
 
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Upload APK (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: app-debug.apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # 发布到 GitHub Release（tag 固定为 latest，每次构建覆盖），得到固定下载链接
+      - name: Publish APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest "$APK" \
+            --title "林业调查 App（最新构建）" \
+            --notes "推送/手动触发自动构建，含 GPS/相机权限及无权限提示。下载 app-debug.apk 直接安装。" \
+            --prerelease
+
+      - name: Write download link to summary
+        run: |
+          echo "## 📱 APK 下载链接（固定地址，每次构建自动更新）" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/download/latest/app-debug.apk" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "构建：${{ github.sha }} @ $(date '+%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_STEP_SUMMARY

@@ -31,6 +31,7 @@ venv/
 .pytest_cache/
 .workbuddy/
 
-# Capacitor / Android（云端 CI 生成，不提交本地）
+# Capacitor / Android
+# node_modules 忽略；android/ 原生工程已定制提交（含 Manifest 权限与 MainActivity 插件）
 node_modules/
-android/
+# android/

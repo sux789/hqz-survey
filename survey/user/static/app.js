@@ -35,10 +35,24 @@ const state = {
   gridTable: 'table1',    // 网格当前表
   gridTownship: '',       // 网格乡镇筛选（空=全部）
   gridVillage: '',        // 网格村筛选（空=全部）
-  gridCompartment: '',    // 网格林班筛选（空=全部）
   _grid: null,            // jspreadsheet 实例
   _gridSurveyMap: {},     // {subcompartment_id: data} 已有调查数据
   subcompartmentPrefilledMap: {}, // {sc_id: prefilled_dict} 网格黄色列取值
+  // 级联筛选：项目 → 分类 → 县/乡/村/林班 → 小班
+  gridCategory: '',                // 当前分类（''=全部分类）
+  gridSubcompartment: null,        // 当前选中的小班对象
+  gridCategories: [],              // 项目可选分类列表
+  gridScRows: null,                // 按分类过滤后的小班集合（null=用 scAllRows）
+  _gridRowFields: [],              // 当前两列表格每行的字段信息（用于行号→字段映射）
+};
+
+// 分类→表映射
+const CATEGORY_TO_TABLE = {
+  '人工造林': 'table1',
+  '封山育林': 'table2',
+  '退化林修复': 'table3',
+  '水利水保': 'table4',
+  '草原': 'table5',
 };
 
 const app = document.getElementById('app');
@@ -67,6 +81,65 @@ function toast(msg, ms = 1800) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), ms);
+}
+
+// ── 原生权限（Capacitor App 内）──
+function isApp() {
+  return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+}
+function permPlugin() {
+  return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.AppPermissions) || null;
+}
+async function permState(type) {
+  const p = permPlugin();
+  if (!p) return { granted: true, state: 'unsupported' };
+  try { return await p.check({ type }); } catch (e) { return { granted: true, state: 'unknown' }; }
+}
+async function permRequest(type) {
+  const p = permPlugin();
+  if (!p) return { granted: true, state: 'unsupported' };
+  try { return await p.request({ type }); } catch (e) { return { granted: false, state: 'denied' }; }
+}
+function permOpenSettings() {
+  const p = permPlugin();
+  if (p) { try { p.openSettings(); } catch (e) {} }
+}
+const PERM_LABEL = { location: '定位', camera: '相机' };
+
+// 权限不足提示弹窗：可跳转系统设置
+function showPermDialog(type, detail) {
+  const root = qs('#modalRoot');
+  const label = PERM_LABEL[type] || '权限';
+  root.innerHTML = `
+    <div class="modal-mask" data-action="close-modal-mask">
+      <div class="modal modal-help">
+        <div class="help-header">
+          <h3>需要${label}权限</h3>
+          <button class="btn-icon" data-action="close-modal">✕</button>
+        </div>
+        <div class="help-body">
+          <p>${detail || `本功能需要「${label}」权限才能正常使用，请在系统设置中开启${label}权限。`}</p>
+        </div>
+        <div class="help-footer" style="display:flex;gap:10px;justify-content:flex-end;padding:12px 16px;border-top:1px solid #eee;">
+          <button class="btn-cancel" data-action="close-modal">知道了</button>
+          <button class="btn-confirm" data-action="perm-open-settings" data-type="${type}">去设置</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// 定位失败统一处理：权限被拒时给出明确提示
+function handleGeoError(err) {
+  if (err && err.code === 1) { // PERMISSION_DENIED
+    if (isApp()) {
+      showPermDialog('location', '未获得定位权限，无法获取 GPS 坐标。请在系统设置中允许「定位」，然后重试。');
+    } else {
+      toast('未授权定位权限：请在浏览器设置中允许定位后重试', 3000);
+    }
+    return;
+  }
+  if (err && err.code === 3) { toast('定位超时，请确认手机定位开关已开启', 2500); return; }
+  toast('定位失败：' + (err && err.message ? err.message : '未知错误'), 2500);
 }
 
 // 统一 fetch 封装：401 自动跳转登录页
@@ -149,8 +222,30 @@ async function init() {
   } catch (e) {
     toast('加载失败：' + e.message, 3000);
   }
-  state.view = 'projects';
+  state.view = 'survey_grid';
   renderApp();
+  checkAppPermissions();
+}
+
+// App 内启动时主动检查定位/相机权限，缺失则先申请；被拒后提示用户
+async function checkAppPermissions() {
+  if (!isApp()) return;
+  try {
+    const loc = await permState('location');
+    const cam = await permState('camera');
+    if (loc.granted && cam.granted) return;
+    await Promise.all([
+      loc.granted ? Promise.resolve() : permRequest('location'),
+      cam.granted ? Promise.resolve() : permRequest('camera'),
+    ]);
+    const loc2 = await permState('location');
+    const cam2 = await permState('camera');
+    if (!loc2.granted) {
+      showPermDialog('location', '未获得定位权限，将无法使用「获取GPS/打卡/轨迹」功能。请在系统设置中允许「定位」。');
+    } else if (!cam2.granted) {
+      showPermDialog('camera', '未获得相机权限，将无法使用「拍照」功能。请在系统设置中允许「相机」。');
+    }
+  } catch (e) { /* 忽略：非必要不阻塞进入页面 */ }
 }
 
 function initFormData(def) {
@@ -243,7 +338,10 @@ function renderTopBar() {
     viewTitle = `<span class="topbar-title">${escapeHtml(state.subcompartment.subcompartment_label || '')}</span>`;
   } else if (state.view === 'survey_grid') {
     const tdef = getGridTableDef(state.gridTable);
-    viewTitle = `<span class="topbar-title">📊 ${escapeHtml((tdef && tdef.name) || '网格调查')}</span>`;
+    const catLabel = state.gridCategory || '全部分类';
+    const scLabel = state.gridSubcompartment ? (state.gridSubcompartment.subcompartment_label || '') : '';
+    const tail = scLabel ? ` · ${escapeHtml(scLabel)}` : '';
+    viewTitle = `<span class="topbar-title">📊 ${escapeHtml(catLabel)}${tail} · ${escapeHtml((tdef && tdef.name) || '网格调查')}</span>`;
   }
   tb.innerHTML = `
     <div class="topbar-left">
@@ -304,7 +402,7 @@ async function enterProject(pid) {
   const p = state.projects.find(x => x.id === pid);
   if (!p) return;
   state.project = p;
-  await goToScList();
+  await goToSurveyGrid();
 }
 
 // ════════════════════════════════════════════
@@ -627,80 +725,109 @@ function getGridTableDef(tableId) {
 
 async function goToSurveyGrid() {
   if (!state.project) { goToProjects(); return; }
-  // 若小班列表未加载，先加载（含 prefilled）
-  if (!state.scAllRows || !state.scAllRows.length) {
-    try {
-      const j = await fetchJSON(`api/projects/${state.project.id}/subcompartments`);
-      state.scAllRows = j.rows || [];
-      state.scFilteredRows = state.scAllRows;
-      const pfMap = {};
-      state.scAllRows.forEach(r => { pfMap[r.id] = r.prefilled || {}; });
-      state.subcompartmentPrefilledMap = pfMap;
-    } catch (e) {
-      state.scAllRows = [];
-      state.subcompartmentPrefilledMap = {};
-    }
+  // 加载该项目的全部小班（含 prefilled）
+  try {
+    const j = await fetchJSON(`api/projects/${state.project.id}/subcompartments`);
+    state.scAllRows = j.rows || [];
+    state.scFilteredRows = state.scAllRows;
+    const pfMap = {};
+    state.scAllRows.forEach(r => { pfMap[r.id] = r.prefilled || {}; });
+    state.subcompartmentPrefilledMap = pfMap;
+  } catch (e) {
+    state.scAllRows = [];
+    state.subcompartmentPrefilledMap = {};
   }
-  // 默认表：若当前 gridTable 不在网格表清单内，回退 table1
-  const ids = gridTableList().map(x => x.id);
-  if (!ids.includes(state.gridTable)) state.gridTable = 'table1';
+  // 加载该项目的分类清单
+  try {
+    const cj = await fetchJSON(`api/projects/${state.project.id}/categories`);
+    state.gridCategories = cj.categories || [];
+  } catch (e) {
+    state.gridCategories = [];
+  }
+  // 默认选第一个分类（若有）
+  if (state.gridCategories.length && !state.gridCategory) {
+    state.gridCategory = state.gridCategories[0];
+    state.gridTable = CATEGORY_TO_TABLE[state.gridCategory] || 'table1';
+  }
+  // 按分类过滤小班
+  await loadGridScRows();
   state.view = 'survey_grid';
   renderApp();
 }
 
+// 按分类过滤小班（不再按 project_name）
+async function loadGridScRows() {
+  if (!state.project) { state.gridScRows = []; return; }
+  const cat = state.gridCategory;
+  if (!cat) { state.gridScRows = state.scAllRows || []; return; }
+  state.gridScRows = (state.scAllRows || []).filter(r => (r.category || '') === cat);
+}
+
 function renderSurveyGridPage() {
   if (!state.project) {
-    return `<div class="page-survey"><div class="empty-hint">未选择项目</div></div>`;
+    return `<div class="page-survey-grid"><div class="empty-hint">未选择项目</div></div>`;
   }
-  const gtables = gridTableList();
-  const tabsHtml = gtables.map(t => {
-    const active = t.id === state.gridTable ? 'active' : '';
-    return `<button class="tab-btn ${active}" data-action="grid-switch-table" data-table="${t.id}">${escapeHtml(t.name)}</button>`;
-  }).join('');
   return `<div class="page-survey-grid">
-    <nav class="tabs-wrap" id="gridTabs">${tabsHtml}</nav>
     <div id="gridToolbarWrap">${renderGridToolbar()}</div>
     <div id="gridContainer" class="grid-container"></div>
   </div>`;
 }
 
-// 工具栏：项目 → 乡镇 → 村 → 林班 级联
-// 每个选项仅展示在当前上游筛选下的可用值
+// 工具栏级联：项目 → 分类 → 乡 → 村 → 小班（已去除林班）
 function renderGridToolbar() {
-  const hint = '点击单元格直接编辑，自动保存';
-  const all = state.scAllRows || [];
+  const hint = '选定小班后两列编辑，自动保存';
+  const baseRows = state.gridScRows || state.scAllRows || [];
   const projects = state.projects || [];
 
+  // 项目下拉
   const pfHtml = projects.map(p =>
     `<option value="${escapeHtml(p.id)}" ${state.project && p.id === state.project.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`
   ).join('');
 
-  // 乡镇：项目范围内
-  const townships = distinctVals(all, 'township').sort();
+  // 分类下拉
+  const catOpts = (state.gridCategories || []).map(c =>
+    `<option value="${escapeHtml(c)}" ${c === state.gridCategory ? 'selected' : ''}>${escapeHtml(c)}</option>`
+  ).join('');
+  const catHtml = `<select id="gridCategoryFilter" data-action="grid-filter-category" title="分类">
+    <option value="">全部分类</option>
+    ${catOpts}
+  </select>`;
+
+  // 乡镇：分类过滤后的全部小班
+  const townships = distinctVals(baseRows, 'township').sort();
   const tfHtml = townships.map(tw =>
     `<option value="${escapeHtml(tw)}" ${tw === state.gridTownship ? 'selected' : ''}>${escapeHtml(tw)}</option>`
   ).join('');
 
   // 村：受已选乡镇级联
-  const afterTown = state.gridTownship ? all.filter(r => r.township === state.gridTownship) : all;
+  const afterTown = state.gridTownship ? baseRows.filter(r => r.township === state.gridTownship) : baseRows;
   const villages = distinctVals(afterTown, 'village').sort();
   const vfHtml = villages.map(v =>
     `<option value="${escapeHtml(v)}" ${v === state.gridVillage ? 'selected' : ''}>${escapeHtml(v)}</option>`
   ).join('');
 
-  // 林班：受已选乡镇 + 村级联
-  const afterVillage = state.gridVillage ? afterTown.filter(r => r.village === state.gridVillage) : afterTown;
-  const compartments = distinctVals(afterVillage, 'forest_compartment')
-    .filter(v => v !== undefined && v !== null && v !== '')
-    .map(Number).sort((a, b) => a - b);
-  const cfHtml = compartments.map(c =>
-    `<option value="${c}" ${String(c) === String(state.gridCompartment) ? 'selected' : ''}>${c}</option>`
+  // 小班下拉（级联到最后）
+  const scRows = getGridFilteredRows();
+  const scOpts = scRows.map(r =>
+    `<option value="${escapeHtml(r.id)}" ${state.gridSubcompartment && r.id === state.gridSubcompartment.id ? 'selected' : ''}>${escapeHtml(r.subcompartment_label || '')}</option>`
   ).join('');
+  const scHtml = `<select id="gridSubcompartmentFilter" data-action="grid-filter-subcompartment" title="小班">
+    <option value="">选择小班</option>
+    ${scOpts}
+  </select>`;
+
+  // 操作按钮（选定小班后显示）
+  const scBtns = state.gridSubcompartment ? `
+    <button class="btn-grid-action" data-action="sc-photo">照片</button>
+    <button class="btn-grid-action" data-action="sc-track">轨迹</button>
+    <button class="btn-grid-action" data-action="sc-checkin">打卡</button>
+  ` : '';
 
   return `<div class="grid-toolbar">
     <select id="gridProjectFilter" data-action="grid-filter-project" title="切换项目">
       ${pfHtml}
     </select>
+    ${catHtml}
     <select id="gridTownshipFilter" data-action="grid-filter-township" title="乡镇">
       <option value="">全部乡镇</option>
       ${tfHtml}
@@ -709,12 +836,18 @@ function renderGridToolbar() {
       <option value="">全部村</option>
       ${vfHtml}
     </select>
-    <select id="gridCompartmentFilter" data-action="grid-filter-compartment" title="林班">
-      <option value="">全部林班</option>
-      ${cfHtml}
-    </select>
+    ${scHtml}
+    ${scBtns}
     <span class="grid-hint">${hint}</span>
   </div>`;
+}
+
+// 按分类+县+乡+村过滤后的小班列表
+function getGridFilteredRows() {
+  let rows = state.gridScRows || state.scAllRows || [];
+  if (state.gridTownship) rows = rows.filter(r => r.township === state.gridTownship);
+  if (state.gridVillage) rows = rows.filter(r => r.village === state.gridVillage);
+  return rows;
 }
 
 function distinctVals(rows, key) {
@@ -729,124 +862,343 @@ function refreshGridToolbar() {
 
 async function bindSurveyGridPage() {
   if (!window.jspreadsheet) { toast('网格库未加载'); return; }
-  // 拉取该表的调查数据（每小班每表一行）
+  await renderSurveyForm();
+}
+
+// 加载选定小班的当前表调查数据
+async function loadGridSubcompartmentData() {
+  if (!state.gridSubcompartment || !state.gridTable) { state._gridSurveyMap = {}; return; }
   try {
-    const j = await fetchJSON(`api/projects/${state.project.id}/survey/${state.gridTable}/rows`);
+    const url = `api/projects/${state.project.id}/survey/${state.gridTable}/rows`;
+    const j = await fetchJSON(url);
     const map = {};
     (j.rows || []).forEach(r => { map[r.subcompartment_id] = r.data || {}; });
     state._gridSurveyMap = map;
-  } catch (e) {
-    state._gridSurveyMap = {};
-  }
-  initSurveyGrid();
+  } catch (e) { state._gridSurveyMap = {}; }
 }
 
-function gridColumns() {
-  const tdef = getGridTableDef(state.gridTable);
-  if (!tdef) return [];
-  const prefilled = tdef.prefilled_columns || [];
-  const inputs = tdef.input_columns || [];
-  const cols = [];
-  prefilled.forEach(p => {
-    cols.push({
-      title: p.label, width: 70, type: 'text', readOnly: true,
-      _prefilledKey: p.key, _isPrefilled: true,
-    });
-  });
-  inputs.forEach(f => {
-    if (f.type === 'photo' || f.type === 'gps' || f.type === 'checkin' || f.type === 'track') return;
-    // sample_array：网格以只读列显示样方数，明细在详情页编辑
-    if (f.type === 'sample_array') {
-      cols.push({
-        title: f.grid_summary || f.label, width: 70, type: 'text', readOnly: true,
-        _fieldKey: f.key, _fieldType: 'sample_array', _isSampleCount: true,
-      });
-      return;
+// 公式计算：根据 formula 名和数据计算 computed 字段值
+function computeFieldValue(formula, data) {
+  const sVals = [1,2,3,4,5].map(i => data['survival_'+i]).filter(v => v !== '' && v != null && !isNaN(Number(v)));
+  switch (formula) {
+    case 't1_sample_count':
+      return sVals.length || '';
+    case 't1_avg_survival': {
+      if (!sVals.length) return '';
+      const sum = sVals.reduce((s, v) => s + Number(v), 0);
+      return (sum / sVals.length).toFixed(2);
     }
-    let type = 'text';
-    let opts = {};
-    if (f.type === 'number' || f.type === 'percent') type = 'numeric';
-    if (f.type === 'enum') { type = 'dropdown'; opts.source = f.options || []; }
-    if (f.type === 'checkbox') type = 'checkbox';
-    if (f.type === 'date') type = 'text';
-    cols.push({
-      title: f.label, width: 90, type, readOnly: false,
-      _fieldKey: f.key, _fieldType: f.type, ...opts,
-    });
-  });
-  return cols;
+    case 't1_avg_survival_rate': {
+      if (!sVals.length) return '';
+      const sum = sVals.reduce((s, v) => s + Number(v), 0);
+      const avg = sum / sVals.length;
+      const sa = Number(data['sample_area']) || 0;
+      const ma = Number(data['mu_area']) || 0;
+      const mc = Number(data['mu_design_count']) || 0;
+      if (!sa || !ma || !mc) return '';
+      return ((avg * ma) / (sa * mc)).toFixed(6);
+    }
+    default: return '';
+  }
 }
 
-function gridDataRows(cols) {
-  let rows = state.scAllRows || [];
-  if (state.gridTownship) rows = rows.filter(r => r.township === state.gridTownship);
-  if (state.gridVillage) rows = rows.filter(r => r.village === state.gridVillage);
-  if (state.gridCompartment !== '') rows = rows.filter(r => String(r.forest_compartment) === String(state.gridCompartment));
-  const pfMap = state.subcompartmentPrefilledMap || {};
-  return rows.map(r => {
-    const pf = pfMap[r.id] || {};
-    const sv = state._gridSurveyMap[r.id] || {};
-    const row = cols.map(c => {
-      if (c._isPrefilled) return pf[c._prefilledKey] != null ? String(pf[c._prefilledKey]) : '';
-      if (c._isSampleCount) {
-        const arr = sv[c._fieldKey];
-        return Array.isArray(arr) ? String(arr.length) : '';
-      }
-      let v = sv[c._fieldKey];
-      if (v == null) v = '';
-      if (c._fieldType === 'checkbox') return (v === true || v === 'true' || v === 1 || v === '1' || v === '有');
-      return String(v);
-    });
-    // 行首附加 _scId 不可见标记（用第一条只读列已含，这里靠行索引映射）
-    return row;
-  });
-}
-
-function initSurveyGrid() {
+// 默认模式两列表格：选定小班后，渲染该小班当前表的两列 Excel（左 label，右值）
+async function renderSurveyForm() {
   const container = qs('#gridContainer');
   if (!container) return;
-  const cols = gridColumns();
-  if (!cols.length) { container.innerHTML = '<div class="empty-hint">该表无字段</div>'; return; }
-  const data = gridDataRows(cols);
+  if (!state.gridSubcompartment) {
+    if (state._grid) { try { state._grid.destroy(); } catch (e) {} state._grid = null; }
+    container.innerHTML = '<div class="empty-hint">请选择小班</div>';
+    state._gridRowFields = [];
+    return;
+  }
+  const sc = state.gridSubcompartment;
+  const tdef = getGridTableDef(state.gridTable);
+  if (!tdef) {
+    if (state._grid) { try { state._grid.destroy(); } catch (e) {} state._grid = null; }
+    container.innerHTML = '<div class="empty-hint">未找到表定义</div>';
+    return;
+  }
+  // 加载该小班的调查数据
+  await loadGridSubcompartmentData();
+  const pf = sc.prefilled || state.subcompartmentPrefilledMap[sc.id] || {};
+  const sv = state._gridSurveyMap[sc.id] || {};
+  const prefilledCols = tdef.prefilled_columns || [];
+  const inputCols = tdef.input_columns || [];
+  // 构建两列数据 + 行字段信息
+  const rowFields = [];
+  const data = [];
+  prefilledCols.forEach(p => {
+    rowFields.push({ kind: 'prefilled', key: p.key, label: p.label, type: p.type || 'text' });
+    const v = pf[p.key] != null ? String(pf[p.key]) : '';
+    data.push([p.label, v]);
+  });
+  inputCols.forEach(f => {
+    // sample_array 在默认模式不显示
+    if (f.type === 'sample_array') return;
+    if (f.type === 'photo' || f.type === 'gps' || f.type === 'checkin' || f.type === 'track') return;
+    // computed 字段：只读 + 自动计算
+    if (f.type === 'computed') {
+      rowFields.push({ kind: 'computed', key: f.key, label: f.label, type: f.type, formula: f.formula });
+      const cv = computeFieldValue(f.formula, sv);
+      data.push([f.label, String(cv)]);
+      return;
+    }
+    // readOnly 输入字段（从密点文件读取等）
+    rowFields.push({ kind: 'input', key: f.key, label: f.label, type: f.type, options: f.options || [], readOnly: !!f.readOnly });
+    let v = sv[f.key];
+    if (v == null) v = '';
+    if (f.type === 'checkbox') v = (v === true || v === 'true' || v === 1 || v === '1' || v === '有') ? 'TRUE' : 'FALSE';
+    data.push([f.label, String(v)]);
+  });
+  state._gridRowFields = rowFields;
+  // 列定义：字段 / 值
+  const cols = [
+    { title: '字段', width: 140, type: 'text', readOnly: true },
+    { title: '值', width: 200, type: 'text', readOnly: false },
+  ];
   if (state._grid) { try { state._grid.destroy(); } catch (e) {} state._grid = null; }
   container.innerHTML = '<div id="gridEl"></div>';
-  // 冻结前 N 列预填（识别列：州/县/乡/村/林班/小班），最多 6 列
-  const pfCount = cols.filter(c => c._isPrefilled).length;
-  const freezeN = Math.min(pfCount, 6);
+  // 预填/computed/readOnly 单元格只读配置
+  const cellsConfig = {};
+  rowFields.forEach((f, i) => {
+    if (f.kind === 'prefilled' || f.kind === 'computed' || (f.kind === 'input' && f.readOnly)) {
+      cellsConfig[`B${i + 1}`] = { readOnly: true };
+    }
+  });
+  // 表格高度：行高28px × 行数 + 表头32 + 边距，让所有行完整显示，外层容器滚动
+  const rowH = 28;
+  const headerH = 32;
+  const tableH = data.length * rowH + headerH + 4;
   state._grid = jspreadsheet(qs('#gridEl'), {
     data: data,
     columns: cols,
+    cells: cellsConfig,
     contextMenu: false,
     allowInsertRow: false,
     allowManualInsertRow: false,
     allowDeleteRow: false,
-    tableOverflow: true,
+    tableOverflow: false,
     tableWidth: '100%',
-    tableHeight: () => Math.max(300, window.innerHeight - 220),
-    freezeColumns: freezeN,
     onchange: (instance, cell, x, y, value) => onGridCellChange(x, y, value),
   });
+  // 让 gridEl 内的 jss 容器和 table 自然撑开高度，不截断
+  const gridEl2 = qs('#gridEl');
+  if (gridEl2) {
+    gridEl2.style.overflow = 'visible';
+    const jss = gridEl2.querySelector('.jss');
+    if (jss) {
+      jss.style.overflow = 'visible';
+      jss.style.maxHeight = 'none';
+      jss.style.height = 'auto';
+    }
+    const tbl = gridEl2.querySelector('table');
+    if (tbl) tbl.style.height = 'auto';
+  }
+  void tableH;
+  // 后处理：单元格背景色 + enum 下拉框
+  const gridEl = qs('#gridEl');
+  if (gridEl) {
+    rowFields.forEach((f, i) => {
+      const td = gridEl.querySelector(`tbody tr:nth-child(${i + 1}) td:nth-child(3)`);
+      if (!td) return;
+      if (f.kind === 'prefilled' || (f.kind === 'input' && f.readOnly)) {
+        td.style.backgroundColor = '#fff3cd';
+      } else if (f.kind === 'computed') {
+        td.style.backgroundColor = '#e3f2fd';
+      }
+      // enum 字段注入 select 下拉框
+      if (f.kind === 'input' && f.type === 'enum' && f.options && f.options.length && !f.readOnly) {
+        const curVal = data[i][1] || '';
+        const select = document.createElement('select');
+        select.className = 'cell-enum-select';
+        select.style.cssText = 'width:100%;height:100%;border:none;background:transparent;font-size:13px;cursor:pointer;';
+        select.innerHTML = '<option value=""></option>' + f.options.map(o =>
+          `<option value="${escapeHtml(o)}" ${o === curVal ? 'selected' : ''}>${escapeHtml(o)}</option>`
+        ).join('');
+        select.addEventListener('change', () => {
+          const val = select.value;
+          state._grid.setValueFromCoords(1, i, val);
+        });
+        td.innerHTML = '';
+        td.appendChild(select);
+      }
+    });
+  }
+  // 表格下方签字卡片：验收人员 / 配合验收人员
+  renderSignCards(sc, sv);
 }
 
-async function onGridCellChange(x, y, value) {
-  const cols = gridColumns();
-  const col = cols[x];
-  if (!col || col._isPrefilled) return;
-  let rows = state.scAllRows || [];
-  if (state.gridTownship) rows = rows.filter(r => r.township === state.gridTownship);
-  if (state.gridVillage) rows = rows.filter(r => r.village === state.gridVillage);
-  if (state.gridCompartment !== '') rows = rows.filter(r => String(r.forest_compartment) === String(state.gridCompartment));
-  const sc = rows[y];
+// 签字卡片：表格下方两个签字区
+function renderSignCards(sc, sv) {
+  const container = qs('#gridContainer');
+  if (!container) return;
+  let signBar = qs('#signBar');
+  if (!signBar) {
+    signBar = document.createElement('div');
+    signBar.id = 'signBar';
+    signBar.className = 'sign-bar';
+    container.appendChild(signBar);
+  }
+  const inspectorSign = sv.inspector_sign || '';
+  const coSign = sv.co_inspector_sign || '';
+  signBar.innerHTML = `
+    <div class="sign-card" data-action="sign-open" data-key="inspector_sign">
+      <div class="sign-title">验收人员签字</div>
+      <div class="sign-area">${inspectorSign
+      ? `<img src="${inspectorSign}" alt="签名">`
+      : '<span class="sign-placeholder">点击签字</span>'}</div>
+    </div>
+    <div class="sign-card" data-action="sign-open" data-key="co_inspector_sign">
+      <div class="sign-title">配合验收人员签字</div>
+      <div class="sign-area">${coSign
+      ? `<img src="${coSign}" alt="签名">`
+      : '<span class="sign-placeholder">点击签字</span>'}</div>
+    </div>
+  `;
+}
+
+// 签字 modal：全屏 canvas 签字
+function openSignModal(key) {
+  let modal = qs('#signModal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'signModal';
+  modal.className = 'sign-modal';
+  modal.innerHTML = `
+    <div class="sign-modal-box">
+      <div class="sign-modal-header">
+        <span class="sign-modal-title">${key === 'inspector_sign' ? '验收人员' : '配合验收人员'}签字</span>
+        <button class="sign-modal-close" data-action="sign-close">×</button>
+      </div>
+      <canvas id="signCanvas" class="sign-canvas"></canvas>
+      <div class="sign-modal-actions">
+        <button class="btn-grid-action" data-action="sign-clear">清除</button>
+        <button class="btn-grid-action btn-primary" data-action="sign-save">保存</button>
+      </div>
+    </div>
+  `;
+  app.appendChild(modal);
+  modal.style.display = 'flex';
+  // 初始化 canvas
+  const canvas = qs('#signCanvas');
+  const box = modal.querySelector('.sign-modal-box');
+  const rect = box.getBoundingClientRect();
+  canvas.width = Math.min(rect.width - 24, window.innerWidth - 24);
+  canvas.height = Math.min(window.innerHeight - 180, 360);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  let drawing = false;
+  let lastX = 0, lastY = 0;
+  const getPos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX - r.left, y: t.clientY - r.top };
+  };
+  const start = (e) => { e.preventDefault(); drawing = true; const p = getPos(e); lastX = p.x; lastY = p.y; };
+  const move = (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const p = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    lastX = p.x; lastY = p.y;
+  };
+  const end = () => { drawing = false; };
+  canvas.addEventListener('mousedown', start);
+  canvas.addEventListener('mousemove', move);
+  canvas.addEventListener('mouseup', end);
+  canvas.addEventListener('mouseleave', end);
+  canvas.addEventListener('touchstart', start, { passive: false });
+  canvas.addEventListener('touchmove', move, { passive: false });
+  canvas.addEventListener('touchend', end);
+  modal._signKey = key;
+  modal._signCanvas = canvas;
+}
+
+function closeSignModal() {
+  const modal = qs('#signModal');
+  if (modal) modal.remove();
+}
+
+function clearSignCanvas() {
+  const canvas = qs('#signCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+async function saveSign() {
+  const modal = qs('#signModal');
+  if (!modal) return;
+  const key = modal._signKey;
+  const canvas = modal._signCanvas;
+  if (!key || !canvas) return;
+  // 检查是否有内容（非全白）
+  const ctx = canvas.getContext('2d');
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let hasInk = false;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) { hasInk = true; break; }
+  }
+  if (!hasInk) { toast('请先签字', 1500); return; }
+  const dataUrl = canvas.toDataURL('image/png');
+  closeSignModal();
+  // 保存到 data_json
+  const sc = state.gridSubcompartment;
   if (!sc) return;
-  // 合并该小班已有调查数据 + 新值
+  const existing = Object.assign({}, state._gridSurveyMap[sc.id] || {});
+  existing[key] = dataUrl;
+  existing['inspector'] = state.user || '';
+  state._gridSurveyMap[sc.id] = existing;
+  try {
+    await fetch(`api/projects/${state.project.id}/survey/${state.gridTable}/rows`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subcompartment_id: sc.id, data: existing, inspector: state.user || '' }),
+    });
+    toast('签字已保存', 1200);
+  } catch (e) {
+    toast('保存失败：' + e.message, 2200);
+  }
+  // 刷新签字卡片
+  renderSignCards(sc, existing);
+}
+
+// 根据样方模式选择渲染入口
+function initSurveyGrid() {
+  renderSurveyForm();
+}
+
+// 单元格变更：针对选定小班保存（两列表格：y 行对应字段索引）
+async function onGridCellChange(x, y, value) {
+  if (!state.gridSubcompartment) return;
+  const sc = state.gridSubcompartment;
+  const rowFields = state._gridRowFields || [];
+  const f = rowFields[y];
+  if (!f || f.kind !== 'input' || f.readOnly) return; // 预填/computed/readOnly 行忽略
   const existing = Object.assign({}, state._gridSurveyMap[sc.id] || {});
   let v = value;
-  if (col._fieldType === 'checkbox') v = (value === true || value === 'true' || value === 1 || value === '1');
-  if (col._fieldType === 'percent') v = value === '' ? '' : Number(value);
-  if (col._fieldType === 'number') v = value === '' ? '' : Number(value);
-  existing[col._fieldKey] = v;
-  // inspector
+  if (f.type === 'checkbox') v = (value === true || value === 'true' || value === 1 || value === '1' || value === 'TRUE' || value === '有');
+  if (f.type === 'percent') v = value === '' ? '' : Number(value);
+  if (f.type === 'number') v = value === '' ? '' : Number(value);
+  existing[f.key] = v;
   existing['inspector'] = state.user || '';
+  // 重算 computed 字段并更新网格
+  rowFields.forEach((cf, idx) => {
+    if (cf.kind !== 'computed') return;
+    const cv = computeFieldValue(cf.formula, existing);
+    existing[cf.key] = cv;
+    if (state._grid && cv !== '') state._grid.setValueFromCoords(1, idx, cv);
+  });
   state._gridSurveyMap[sc.id] = existing;
   try {
     await fetch(`api/projects/${state.project.id}/survey/${state.gridTable}/rows`, {
@@ -1177,23 +1529,6 @@ function renderSampleControl(sf, v, sampleKey, idx) {
   }
 }
 
-// 新增空样方对象（按 sample_fields 默认值初始化）
-function newSampleObject(sampleFields) {
-  const obj = {};
-  for (const sf of sampleFields) {
-    if (sf.type === 'date' && sf.default === 'today') {
-      obj[sf.key] = todayStr();
-    } else if (sf.type === 'checkbox') {
-      obj[sf.key] = sf.default !== undefined ? !!sf.default : false;
-    } else if (sf.default !== undefined && sf.default !== '') {
-      obj[sf.key] = sf.default;
-    } else {
-      obj[sf.key] = '';
-    }
-  }
-  return obj;
-}
-
 function numAttrs(f) {
   let s = '';
   if (f.min !== undefined) s += `min="${f.min}" `;
@@ -1303,7 +1638,8 @@ async function saveSurvey() {
 // ── 导出 ──
 function exportData() {
   if (!state.project) { toast('请先选择项目'); return; }
-  window.open(`api/projects/${state.project.id}/export`, '_blank');
+  const url = `api/projects/${state.project.id}/export`;
+  window.open(url, '_blank');
 }
 
 // ── GPS ──
@@ -1321,7 +1657,7 @@ function getGPS() {
     if (latEl) latEl.textContent = lat;
     toast('定位成功');
   }, err => {
-    toast('定位失败：' + (err.message || '未知错误'), 2500);
+    handleGeoError(err);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
@@ -1343,7 +1679,7 @@ function getSampleGPS(sampleKey, idx) {
     if (latEl) latEl.textContent = lat;
     toast('定位成功');
   }, err => {
-    toast('定位失败：' + (err.message || '未知错误'), 2500);
+    handleGeoError(err);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
@@ -1454,7 +1790,7 @@ async function quickCheckin(scId) {
       toast('打卡失败：' + e.message, 2500);
     }
   }, err => {
-    toast('定位失败：' + (err.message || '未知错误'), 2500);
+    handleGeoError(err);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
@@ -1551,7 +1887,7 @@ async function scCheckin() {
       toast('打卡失败：' + e.message, 2500);
     }
   }, err => {
-    toast('定位失败：' + (err.message || '未知错误'), 2500);
+    handleGeoError(err);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
@@ -1580,7 +1916,7 @@ async function scTrackToggle() {
     };
     state.scExtras.track.push(pt);
   }, err => {
-    toast('轨迹记录中断：' + (err.message || ''), 2500);
+    handleGeoError(err);
     navigator.geolocation.clearWatch(_scWatchId);
     _scWatchId = null;
     state._scTracking = false;
@@ -1639,6 +1975,39 @@ async function scTrackFileUpload(input) {
   _renderScPanel();
 }
 
+// 照片名前缀：分类_乡镇_村_小班_拍照时间
+function buildPhotoName(sc, origName) {
+  const clean = (v) => (v == null ? '' : String(v).trim()).replace(/[\\/:*?"<>|\s]+/g, '_');
+  const parts = [
+    clean(sc.category),
+    clean(sc.township),
+    clean(sc.village),
+    clean(sc.subcompartment_label || sc.subcompartment),
+  ];
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  parts.push(stamp);
+  const name = parts.filter(Boolean).join('_');
+  const dot = origName ? origName.lastIndexOf('.') : -1;
+  const ext = (dot >= 0) ? origName.slice(dot) : '';
+  return name + ext;
+}
+
+// 将拍照文件以「分类_乡镇_村_小班_时间」前缀名下载保存到安卓相册
+function savePhotoToAlbum(file, name) {
+  try {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 3000);
+  } catch (e) { /* 下载失败不影响元数据保存 */ }
+}
+
 async function scPhotoFileChange(input) {
   if (!state.subcompartment || !input.files || !input.files[0]) return;
   const file = input.files[0];
@@ -1654,14 +2023,42 @@ async function scPhotoFileChange(input) {
   }
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
   if (!state.scExtras.photos) state.scExtras.photos = [];
+  const name = buildPhotoName(state.subcompartment, file.name);
+  savePhotoToAlbum(file, name);
   state.scExtras.photos.push({
-    name: file.name,
+    name,
     lng, lat,
     t: new Date().toISOString(),
     url: '',
   });
   await _scSavePhotos();
   _renderScPanel();
+}
+
+// 网格调查页「照片」按钮：直接调用安卓相机拍照（不弹面板），拍完按前缀命名保存
+async function gridScPhotoChange(input) {
+  if (!state.gridSubcompartment || !input.files || !input.files[0]) { input.remove(); return; }
+  const sc = state.gridSubcompartment;
+  if (!state.subcompartment) state.subcompartment = sc;
+  const file = input.files[0];
+  let lng = '', lat = '';
+  if (navigator.geolocation) {
+    try {
+      const pos = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+      });
+      lng = pos.coords.longitude.toFixed(6);
+      lat = pos.coords.latitude.toFixed(6);
+    } catch (e) { /* 定位失败仍可保存照片 */ }
+  }
+  if (!state.scExtras) state.scExtras = { track: [], photos: [] };
+  if (!state.scExtras.photos) state.scExtras.photos = [];
+  const name = buildPhotoName(sc, file.name);
+  savePhotoToAlbum(file, name);
+  state.scExtras.photos.push({ name, lng, lat, t: new Date().toISOString(), url: '' });
+  await _scSavePhotos();
+  toast('照片已保存：' + name);
+  input.remove();
 }
 
 function scPhotoRemove(idx) {
@@ -1771,6 +2168,9 @@ app.addEventListener('click', async (e) => {
       if (action === 'close-modal-mask' && e.target !== t) break;
       closeModal();
       break;
+    case 'perm-open-settings':
+      permOpenSettings();
+      break;
     // ── 三级导航 ──
     case 'go-projects':
       goToProjects();
@@ -1788,10 +2188,6 @@ app.addEventListener('click', async (e) => {
       break;
     case 'go-survey-grid':
       await goToSurveyGrid();
-      break;
-    case 'grid-switch-table':
-      state.gridTable = t.dataset.table;
-      renderApp();
       break;
     // grid-filter-township 由 change 事件处理（避免下拉展开时误触重渲染）
     case 'sc-enter-survey':
@@ -1812,8 +2208,57 @@ app.addEventListener('click', async (e) => {
     case 'sc-row-checkin':
       await quickCheckin(t.dataset.scid);
       break;
+    // 网格调查页：选定小班的照片 → 直接调用安卓相机拍照（capture）
+    case 'sc-photo': {
+      if (!state.gridSubcompartment) { toast('请先选择小班'); break; }
+      // App 内先校验相机权限，无权限则提示
+      if (isApp()) {
+        const ps = await permState('camera');
+        if (!ps.granted) {
+          const req = await permRequest('camera');
+          if (!req.granted) {
+            showPermDialog('camera', '未获得相机权限，无法拍照。请在系统设置中允许「相机」，然后重试。');
+            break;
+          }
+        }
+      }
+      if (!state.subcompartment) state.subcompartment = state.gridSubcompartment;
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = 'image/*';
+      inp.setAttribute('capture', 'environment');
+      inp.style.display = 'none';
+      inp.addEventListener('change', async () => { await gridScPhotoChange(inp); }, { once: true });
+      document.body.appendChild(inp);
+      inp.click();
+      break;
+    }
+    case 'sc-track':
+      if (state.gridSubcompartment) await openScPanelForRow(state.gridSubcompartment.id);
+      break;
+    // 签字
+    case 'sign-open': {
+      const key = t.getAttribute('data-key');
+      if (key) openSignModal(key);
+      break;
+    }
+    case 'sign-close':
+      closeSignModal();
+      break;
+    case 'sign-clear':
+      clearSignCanvas();
+      break;
+    case 'sign-save':
+      await saveSign();
+      break;
+    // 网格调查页：样方模式切换
     case 'sc-checkin':
-      await scCheckin();
+      // 网格视图：用选定小班快速打卡；其它视图（详情面板）：用 state.subcompartment 打卡
+      if (state.view === 'survey_grid' && state.gridSubcompartment) {
+        await quickCheckin(state.gridSubcompartment.id);
+      } else {
+        await scCheckin();
+      }
       break;
     case 'sc-track-toggle':
       await scTrackToggle();
@@ -1868,18 +2313,21 @@ async function switchGridProject(pid) {
   const p = (state.projects || []).find(x => x.id === pid);
   if (!p) return;
   state.project = p;
+  state.gridCategory = '';
+  state.gridTable = 'table1';
   state.gridTownship = '';
   state.gridVillage = '';
-  state.gridCompartment = '';
+  state.gridSubcompartment = null;
   state.scAllRows = [];
   state.scFilteredRows = [];
+  state.gridScRows = [];
   state.subcompartmentPrefilledMap = {};
   state._gridSurveyMap = {};
   await goToSurveyGrid();
 }
 
 // change 事件
-app.addEventListener('change', (e) => {
+app.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.classList && t.classList.contains('f-photo')) {
     const field = t.dataset.field;
@@ -1903,24 +2351,48 @@ app.addEventListener('change', (e) => {
     switchGridProject(t.value);
     return;
   }
+  if (t.id === 'gridCategoryFilter') {
+    state.gridCategory = t.value;
+    state.gridTable = CATEGORY_TO_TABLE[t.value] || 'table1';
+    state.gridTownship = '';
+    state.gridVillage = '';
+    state.gridSubcompartment = null;
+    await loadGridScRows();
+    refreshGridToolbar();
+    await renderSurveyForm();
+    return;
+  }
+  if (t.id === 'gridSubcompartmentFilter') {
+    const scId = t.value;
+    state.gridSubcompartment = (state.gridScRows || []).find(r => r.id === scId) || null;
+    state.subcompartment = state.gridSubcompartment;  // 复用照片/打卡等扩展数据流程
+    await loadGridSubcompartmentData();
+    // 预载扩展数据（照片/轨迹/打卡），避免拍照保存时覆盖历史记录
+    if (state.gridSubcompartment) {
+      try {
+        const j = await fetchJSON(`api/subcompartments/rows/${state.gridSubcompartment.id}`);
+        state.scExtras = j.extras || { track: [], photos: [] };
+      } catch (e) { state.scExtras = { track: [], photos: [] }; }
+    } else {
+      state.scExtras = null;
+    }
+    refreshGridToolbar();
+    await renderSurveyForm();
+    return;
+  }
   if (t.id === 'gridTownshipFilter') {
     state.gridTownship = t.value;
     state.gridVillage = '';        // 级联：清空下级筛选
-    state.gridCompartment = '';
+    state.gridSubcompartment = null;
     refreshGridToolbar();
-    initSurveyGrid();
+    await renderSurveyForm();
     return;
   }
   if (t.id === 'gridVillageFilter') {
     state.gridVillage = t.value;
-    state.gridCompartment = '';    // 级联：清空下级筛选
+    state.gridSubcompartment = null;    // 级联：清空下级筛选
     refreshGridToolbar();
-    initSurveyGrid();
-    return;
-  }
-  if (t.id === 'gridCompartmentFilter') {
-    state.gridCompartment = t.value;
-    initSurveyGrid();
+    await renderSurveyForm();
     return;
   }
 });
