@@ -215,16 +215,9 @@ function computeGroups(fields) {
 
 // ── 初始化 ──
 async function init() {
-  // 远程 URL 模式下，Capacitor Bridge 可能在页面脚本之后才注入；先等待就绪再判断
-  await waitForCapacitor(3000);
-  // 仅允许在宏芊紫验收APP（Capacitor 原生壳）内运行，浏览器打开直接拦截
-  if (!isApp()) {
-    renderBrowserBlock();
-    return;
-  }
-  // 启动即预先申请默认权限（定位/相机），被拒时提示；具体功能使用前还会再次校验
-  checkAppPermissions();
   renderShell();
+  // 启动即预先申请默认权限（定位/相机）；内部等待 Capacitor Bridge 就绪，不阻塞页面渲染
+  checkAppPermissions();
   try {
     const me = await fetchJSON('api/me');
     state.currentUser = me;
@@ -250,12 +243,22 @@ async function init() {
   } catch (e) {
     toast('加载失败：' + e.message, 3000);
   }
+  // 未选择项目时自动恢复最后一次调查的项目（无记录则取列表第一个）
+  let lastPid = null;
+  try { lastPid = localStorage.getItem('hqz_survey_last_project'); } catch (e) {}
+  const autoProject = state.projects.find(p => p.id === lastPid) || state.projects[0];
+  if (autoProject) {
+    await enterProject(autoProject.id);
+    return;
+  }
   state.view = 'survey_grid';
   renderApp();
 }
 
 // App 内启动时主动检查定位/相机权限，缺失则先申请；被拒后提示用户
 async function checkAppPermissions() {
+  // 远程 URL 模式下 Bridge 可能晚于页面脚本注入，先等待就绪（浏览器/未就绪时静默跳过）
+  await waitForCapacitor(3000);
   if (!isApp()) return;
   try {
     const loc = await permState('location');
@@ -327,21 +330,6 @@ function renderShell() {
     </div>
     <div id="modalRoot"></div>
   `;
-}
-
-// 浏览器拦截：本系统仅限宏芊紫验收APP内使用
-const APP_DOWNLOAD_URL = 'https://github.com/sux789/hqz-survey/releases/download/latest/app-debug.apk';
-function renderBrowserBlock() {
-  const bs = qs('#boot-splash');
-  if (bs) bs.remove();
-  document.title = '宏芊紫验收APP';
-  app.innerHTML = `
-    <div style="min-height:100vh;background:#2e7d32;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:32px;text-align:center;font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;">
-      <div style="font-size:56px;">📱</div>
-      <div style="color:#fff;font-size:24px;font-weight:700;letter-spacing:2px;">宏芊紫验收APP</div>
-      <div style="color:rgba(255,255,255,.92);font-size:15px;line-height:1.7;">本系统不支持在浏览器中运行<br>请下载并使用宏芊紫验收APP</div>
-      <a href="${APP_DOWNLOAD_URL}" style="margin-top:8px;background:#fff;color:#2e7d32;text-decoration:none;font-weight:700;font-size:16px;padding:12px 32px;border-radius:24px;">下载 APP（Android）</a>
-    </div>`;
 }
 
 function renderApp() {
@@ -446,6 +434,8 @@ async function enterProject(pid) {
   const p = state.projects.find(x => x.id === pid);
   if (!p) return;
   state.project = p;
+  // 记住最后调查的项目，下次启动自动恢复
+  try { localStorage.setItem('hqz_survey_last_project', pid); } catch (e) {}
   await goToSurveyGrid();
 }
 
