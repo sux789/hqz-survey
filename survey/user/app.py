@@ -166,12 +166,15 @@ def api_project_subcompartments(pid):
     """
     project_name = request.args.get("project_name", "") or None
     category = request.args.get("category", "") or None
+    with_geom = request.args.get("with_geom") == "1"
     rows = storage.list_project_subcompartment_rows(pid, project_name=project_name, category=category)
-    # 精简返回 + prefilled 映射（供网格调查页黄色列直接取值）
+    # 精简返回 + prefilled 映射（供网格调查页黄色列直接取值）。
+    # 默认不返回 geom_geojson（占响应 85%，前端列表/网格均不用，
+    # 地图走 /geojson 端点、单班详情走 rows/<id>）；需要时 ?with_geom=1。
     light = []
     for r in rows:
         data = r.get("data") or {}
-        light.append({
+        item = {
             "id": r["id"],
             "township": r.get("township", ""),
             "village": r.get("village", ""),
@@ -179,15 +182,19 @@ def api_project_subcompartments(pid):
             "subcompartment": r.get("subcompartment", ""),
             "subcompartment_label": r.get("subcompartment_label", ""),
             "tending_area": r.get("tending_area", 0),
-            "geom_geojson": r.get("geom_geojson", ""),
             "project_name": r.get("project_name", ""),
             "category": r.get("category", ""),
             "city": data.get("州", data.get("乡镇", "")),
             "tree_species": data.get("优势树", data.get("优势树种", "")),
             "ownership": data.get("土地权", data.get("土地权属", "")),
             "forest_type": data.get("林种", ""),
-            "prefilled": S.map_subcompartment_to_prefilled(data),
-        })
+            # prefilled 裁掉空值（保留数值 0，如林班号为 0）：前端 pf[key] 直取，
+            # undefined 与 '' 渲染等价；0 == ''/None 均为 False 不会被裁
+            "prefilled": {k: v for k, v in (S.map_subcompartment_to_prefilled(data) or {}).items() if v not in ("", None)},
+        }
+        if with_geom:
+            item["geom_geojson"] = r.get("geom_geojson", "")
+        light.append(item)
     return jsonify({"rows": light, "count": len(light)})
 
 
@@ -405,6 +412,30 @@ def api_export(pid):
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"导出失败: {e}"}), 500
+
+
+@app.route("/api/projects/<pid>/export_tracks")
+@_login_required
+def api_export_tracks(pid):
+    """导出项目全部轨迹为 GPX zip（ArcGIS 可直接识别）。"""
+    proj = storage.get_project(pid)
+    if not proj:
+        return jsonify({"error": "项目不存在"}), 404
+    try:
+        output, stats = exporter.export_tracks_zip(pid)
+        filename = f"{proj['name']}_轨迹GPX.zip"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/zip",
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         import traceback
         traceback.print_exc()
