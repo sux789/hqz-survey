@@ -129,7 +129,11 @@ def admin_required(forest_db, local_dev=False, local_user="本地测试员"):
         @wraps(f)
         def wrapper(*args, **kwargs):
             u = current_user(forest_db, local_dev, local_user)
-            if not u or not u.get("is_admin"):
+            if not u:
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "未登录", "login_url": LOGIN_URL + "?next=" + request.script_root + "/"}), 401
+                return redirect(LOGIN_URL + "?next=" + request.script_root + "/")
+            if not u.get("is_admin"):
                 return jsonify({"error": "需要管理员权限"}), 403
             return f(*args, **kwargs)
         return wrapper

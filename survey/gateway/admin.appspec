@@ -1,0 +1,9 @@
+code: admin
+name: 林业调查管理后台
+prefix: /survey-admin
+root: /home/www/bibook_deploy/apps/survey
+factory: survey.admin.app:create_app
+static_url_path: /survey-admin/static
+auth: global
+description: GDB上传/用户管理/项目管理
+enabled: true

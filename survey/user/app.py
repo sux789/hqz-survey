@@ -12,7 +12,8 @@
   GET  /survey/api/schema/extras         扩展字段定义
   GET  /survey/api/projects              我的项目（只看自己）
   GET  /survey/api/projects/<pid>        项目详情
-  GET  /survey/api/projects/<pid>/subcompartments  小班列表
+  GET  /survey/api/projects/<pid>/subcompartments  小班列表（支持 ?category= 过滤）
+  GET  /survey/api/projects/<pid>/categories       项目含有的分类清单
   GET  /survey/api/projects/<pid>/geojson         小班面 GeoJSON
   GET  /survey/api/subcompartments/rows/<row_id>   小班详情
   GET  /survey/api/projects/<pid>/survey/<tid>/rows        网格调查行（每小班一行）
@@ -152,8 +153,13 @@ def api_project_one(pid):
 @app.route("/api/projects/<pid>/subcompartments")
 @_login_required
 def api_project_subcompartments(pid):
-    """小班列表（含 GDB 几何缓存，用于地图渲染）。"""
-    rows = storage.list_project_subcompartment_rows(pid)
+    """小班列表（含 GDB 几何缓存，用于地图渲染）。
+
+    支持按 project_name / category 过滤（调查两级选择用）。
+    """
+    project_name = request.args.get("project_name", "") or None
+    category = request.args.get("category", "") or None
+    rows = storage.list_project_subcompartment_rows(pid, project_name=project_name, category=category)
     # 精简返回 + prefilled 映射（供网格调查页黄色列直接取值）
     light = []
     for r in rows:
@@ -167,6 +173,8 @@ def api_project_subcompartments(pid):
             "subcompartment_label": r.get("subcompartment_label", ""),
             "tending_area": r.get("tending_area", 0),
             "geom_geojson": r.get("geom_geojson", ""),
+            "project_name": r.get("project_name", ""),
+            "category": r.get("category", ""),
             "city": data.get("州", data.get("乡镇", "")),
             "tree_species": data.get("优势树", data.get("优势树种", "")),
             "ownership": data.get("土地权", data.get("土地权属", "")),
@@ -174,6 +182,31 @@ def api_project_subcompartments(pid):
             "prefilled": S.map_subcompartment_to_prefilled(data),
         })
     return jsonify({"rows": light, "count": len(light)})
+
+
+@app.route("/api/projects/<pid>/project_names")
+@_login_required
+def api_project_names(pid):
+    """返回项目下所有项目名称及其分类清单（调查两级选择 / 导出用）。"""
+    return jsonify({"project_names": storage.get_project_names(pid)})
+
+
+@app.route("/api/projects/<pid>/categories")
+@_login_required
+def api_project_categories(pid):
+    """返回项目含有的分类清单（从 subcompartment_rows.category 去重）。"""
+    conn = storage._connect()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT category FROM subcompartment_rows "
+            "WHERE (gdb_id IN (SELECT id FROM gdb_files WHERE project_id=?) "
+            "  OR batch_id IN (SELECT id FROM subcompartment_batches WHERE project_id=?)) "
+            "AND category != '' ORDER BY category",
+            (pid, pid)
+        ).fetchall()
+        return jsonify({"categories": [r["category"] for r in rows]})
+    finally:
+        conn.close()
 
 
 @app.route("/api/projects/<pid>/geojson")
@@ -277,9 +310,11 @@ def api_update_subcompartment(row_id):
 def api_get_survey_rows(pid, table_id):
     """获取某表所有小班的调查行（网格模式）。
 
+    支持 ?project_name= 过滤（仅返回该项目名称下的小班调查行）。
     返回：{rows: [{subcompartment_id, data, inspector, updated_at}, ...]}
     """
-    return jsonify({"rows": storage.get_survey_rows(pid, table_id)})
+    project_name = request.args.get("project_name", "") or None
+    return jsonify({"rows": storage.get_survey_rows(pid, table_id, project_name=project_name)})
 
 
 @app.route("/api/projects/<pid>/survey/<table_id>/rows", methods=["PUT"])
@@ -348,9 +383,15 @@ def api_export(pid):
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
+    # ?project_name= 按项目名称导出（每个项目名称一份文件，按分类分 sheet）
+    project_name = request.args.get("project_name", "") or None
     try:
-        output, stats = exporter.export_project(pid)
-        filename = f"{proj['name']}_验收数据.xlsx"
+        if project_name:
+            output, stats = exporter.export_project_name(project_name, pid)
+            filename = f"{project_name}_验收数据.xlsx"
+        else:
+            output, stats = exporter.export_project(pid)
+            filename = f"{proj['name']}_验收数据.xlsx"
         return send_file(
             output,
             as_attachment=True,

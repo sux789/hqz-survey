@@ -7,7 +7,7 @@
 路由总览:
   GET  /admin/                          管理后台首页
   GET  /admin/api/me                    当前管理员
-  POST /admin/api/gdb/upload            上传 GDB（zip）
+  POST /admin/api/gdb/upload            上传 GDB（zip，自动读项目名建项目）
   GET  /admin/api/gdb                   GDB 文件列表
   GET  /admin/api/gdb/<gid>             GDB 详情
   GET  /admin/api/gdb/<gid>/layers      图层列表
@@ -97,93 +97,171 @@ def api_me():
 @app.route("/api/gdb/upload", methods=["POST"])
 @_admin_required
 def api_gdb_upload():
-    """上传 GDB 文件（zip 格式）。
+    """上传 GDB 文件（zip），自动读取项目名并创建项目。
 
     Body: multipart/form-data
-      - file: zip 文件
-      - project_id: 关联项目 ID
+      - file: zip 文件（无需 project_id，项目名从 GDB 图层属性读取）
+
+    流程：
+      1. 解压 → 一二层目录找 .gdb
+      2. 扫描分类图层（人工造林/封山育林/退化林修复/水利水保/草原）
+      3. 从分类图层属性读项目名
+      4. 校验：无分类图层/无项目名/项目名不一致/项目已上传
+      5. 自动创建项目 + 按分类导入小班
+
+    Returns:
+      {project, categories, layers, skipped_layers, imported}
     """
     u = A.current_user(FOREST_DB, LOCAL_DEV, LOCAL_USER)
-
-    if "file" not in request.files:
-        return jsonify({"error": "请选择 zip 文件"}), 400
-    f = request.files["file"]
-    if not f.filename:
-        return jsonify({"error": "请选择文件"}), 400
-
-    pid = request.form.get("project_id", "")
-    if not pid:
-        return jsonify({"error": "project_id 不能为空"}), 400
-
-    proj = storage.get_project(pid)
-    if not proj:
-        return jsonify({"error": "项目不存在"}), 404
-
-    # 读取内容计算 SHA256
-    content = f.read()
-    file_hash = hashlib.sha256(content).hexdigest()
-
-    # 查重
-    existing = storage.find_gdb_by_hash(file_hash)
-    if existing:
-        return jsonify({
-            "error": "该 GDB 文件已上传过",
-            "existing_gid": existing["id"],
-            "uploaded_at": existing["uploaded_at"],
-        }), 409
-
-    # 保存文件
-    gid = uuid.uuid4().hex[:12]
-    f.seek(0)
     try:
-        result = GDB.save_gdb_upload(f, pid, gid)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": f"解压失败: {e}"}), 400
+        if "file" not in request.files:
+            return jsonify({"error": "请选择 zip 文件"}), 400
+        f = request.files["file"]
+        if not f.filename:
+            return jsonify({"error": "请选择文件"}), 400
 
-    # 读取图层信息
-    try:
-        layers = GDB.list_layers(result["path"])
-    except Exception as e:
-        GDB.delete_gdb_files(gid)
-        return jsonify({"error": f"读取 GDB 图层失败: {e}"}), 400
+        app.logger.info("[GDB上传] 开始 file=%s", f.filename)
 
-    # 写入数据库
-    gdb_rec = storage.create_gdb_file(
-        project_id=pid,
-        file_name=f.filename,
-        file_hash=file_hash,
-        layers=layers,
-        uploaded_by=u["username"],
-    )
+        # 读取内容计算 SHA256（文件级查重）
+        content = f.read()
+        file_hash = hashlib.sha256(content).hexdigest()
+        app.logger.info("[GDB上传] 文件大小=%d 字节 hash=%s", len(content), file_hash[:12])
 
-    # 物化导入：将「抚育区」图层小班写入 subcompartment_rows
-    import_result = {"imported": 0, "skipped": 0}
-    layer_names = [l["name"] for l in layers]
-    target_layer = "抚育区" if "抚育区" in layer_names else (layer_names[0] if layer_names else "")
-    if target_layer:
+        existing = storage.find_gdb_by_hash(file_hash)
+        if existing:
+            return jsonify({
+                "error": "该 GDB 文件已上传过",
+                "existing_gid": existing["id"],
+                "uploaded_at": existing["uploaded_at"],
+            }), 409
+
+        # 保存 + 解压
+        gid = uuid.uuid4().hex[:12]
+        f.seek(0)
+        try:
+            result = GDB.save_gdb_upload(f, gid)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": f"解压失败: {e}"}), 400
+
+        # 扫描分类图层
+        scan = GDB.scan_classified_layers(result["path"])
+        classified = scan["classified"]
+        skipped_layers = scan["skipped"]
+
+        app.logger.info("[GDB上传] gid=%s 分类图层=%s 跳过=%s",
+                        gid,
+                        [l["name"] for l in classified],
+                        [l["name"] for l in skipped_layers])
+
+        # 校验①：无分类图层
+        if not classified:
+            GDB.delete_gdb_files(gid)
+            return jsonify({
+                "error": "未找到分类图层（人工造林/封山育林/退化林修复/水利水保/草原）",
+                "skipped_layers": skipped_layers,
+            }), 400
+
+        # 读项目名（从每个分类图层属性读取）
+        layer_meta = {}
+        project_names_seen = []
+        for l in classified:
+            lname = l["name"]
+            category = l["category"]
+            pn = GDB.read_project_name(result["path"], lname)
+            layer_meta[lname] = {"category": category, "project_name": pn or ""}
+            if pn and pn not in project_names_seen:
+                project_names_seen.append(pn)
+
+        app.logger.info("[GDB上传] 预分类: project_names=%s", project_names_seen)
+
+        # 校验②：无项目名
+        if not project_names_seen:
+            GDB.delete_gdb_files(gid)
+            return jsonify({
+                "error": "无法从图层属性读取项目名称（字段别名：项目名称/项目/工程名称/工程/项目名）",
+                "classified_layers": classified,
+            }), 400
+
+        # 校验③：项目名不唯一
+        if len(project_names_seen) > 1:
+            GDB.delete_gdb_files(gid)
+            return jsonify({
+                "error": f"图层间项目名称不一致：{' vs '.join(project_names_seen)}",
+                "project_names": project_names_seen,
+            }), 400
+
+        project_name = project_names_seen[0]
+
+        # 校验④：项目已上传（全局查重）
+        if storage.project_name_exists_global(project_name):
+            GDB.delete_gdb_files(gid)
+            return jsonify({
+                "error": f"项目「{project_name}」已上传，请勿重复上传",
+                "project_name": project_name,
+            }), 409
+
+        # 自动创建项目
+        proj = storage.create_project(project_name, u["username"])
+        pid = proj["id"]
+        app.logger.info("[GDB上传] 自动建项目 pid=%s name=%s", pid, project_name)
+
+        # 写入 GDB 文件记录
+        layers_info = GDB.list_layers(result["path"])
+        gdb_rec = storage.create_gdb_file(
+            project_id=pid,
+            file_name=f.filename,
+            file_hash=file_hash,
+            layers=layers_info,
+            uploaded_by=u["username"],
+            gid=gid,
+        )
+
+        # 按分类导入小班
+        import_result = {"imported": 0, "skipped": 0, "layers": {}}
         try:
             import_result = storage.import_gdb_subcompartments(
-                gid, pid, result["path"], layer=target_layer
-            )
+                gid, pid, result["path"], layer_meta=layer_meta, file_name=f.filename)
+            app.logger.info("[GDB上传] 导入完成: %s", import_result)
         except Exception as e:
-            import_result = {"imported": 0, "skipped": 0, "error": str(e)}
+            import traceback
+            app.logger.error("[GDB上传] 导入异常: %s\n%s", e, traceback.format_exc())
+            import_result = {"imported": 0, "skipped": 0, "layers": {}, "error": str(e)}
 
-    # 生成 md 快照（AI 高速路索引）
-    try:
-        md_dir = Path(result["gdb_dir"]) / "gdb2md"
-        GDB.to_md(result["path"], str(md_dir))
-    except Exception:
-        pass  # md 生成失败不阻塞
+        # 收集分类
+        imported_categories = sorted({
+            v.get("category") for v in import_result.get("layers", {}).values() if v.get("category")
+        })
+        if not imported_categories:
+            imported_categories = sorted({l["category"] for l in classified})
 
-    return jsonify({
-        "gid": gid,
-        "file_name": f.filename,
-        "layers": layers,
-        "imported": import_result,
-        "uploaded_at": gdb_rec["uploaded_at"],
-    }), 201
+        # 生成 md 快照
+        try:
+            md_dir = Path(result["gdb_dir"]) / "gdb2md"
+            GDB.to_md(result["path"], str(md_dir))
+        except Exception:
+            pass
+
+        if import_result.get("imported", 0) == 0:
+            app.logger.warning(
+                "[GDB上传] 警告：imported=0，分类图层=%s，skip=%s",
+                [l["name"] for l in classified], import_result.get("skipped", 0),
+            )
+
+        return jsonify({
+            "project": {"id": pid, "name": project_name},
+            "categories": imported_categories,
+            "layers": import_result.get("layers", {}),
+            "skipped_layers": skipped_layers,
+            "imported": import_result.get("imported", 0),
+            "skipped": import_result.get("skipped", 0),
+            "uploaded_at": gdb_rec["uploaded_at"],
+        }), 201
+    except Exception as e:
+        import traceback
+        app.logger.error("[GDB上传] 未捕获异常: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": f"上传处理失败: {e}", "trace": traceback.format_exc()}), 500
 
 
 @app.route("/api/gdb")
@@ -578,7 +656,7 @@ def healthz():
     })
 
 
-def create_app(prefix='/admin'):
+def create_app(prefix='/survey-admin'):
     """返回已配置的 app 实例。部署由 gateway 聚合。"""
     if prefix:
         app.config['APPLICATION_ROOT'] = prefix

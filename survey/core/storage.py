@@ -76,10 +76,6 @@ def init_db():
                     FOREIGN KEY (project_id) REFERENCES projects(id),
                     UNIQUE(project_id, table_id, subcompartment_id)
                 );
-                CREATE INDEX IF NOT EXISTS idx_records_project_table
-                    ON records(project_id, table_id);
-                CREATE INDEX IF NOT EXISTS idx_records_subcompartment
-                    ON records(subcompartment_id);
 
                 CREATE TABLE IF NOT EXISTS project_members (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,39 +154,60 @@ def init_db():
             # 同一小班同表多条：取 updated_at 最新一条；subcompartment_id='' 的脏数据丢弃。
             old_cols = {r["name"] for r in conn.execute("PRAGMA table_info('records')")}
             if "subtable_id" in old_cols or "row_index" in old_cols:
-                conn.executescript("""
-                    CREATE TABLE records_new (
-                        id                TEXT PRIMARY KEY,
-                        project_id        TEXT NOT NULL,
-                        table_id          TEXT NOT NULL,
-                        subcompartment_id TEXT NOT NULL,
-                        data_json         TEXT NOT NULL,
-                        inspector         TEXT DEFAULT '',
-                        created_at        TEXT NOT NULL,
-                        updated_at        TEXT NOT NULL,
-                        FOREIGN KEY (project_id) REFERENCES projects(id),
-                        UNIQUE(project_id, table_id, subcompartment_id)
-                    );
-                    INSERT INTO records_new
-                        (id, project_id, table_id, subcompartment_id, data_json, inspector, created_at, updated_at)
-                    SELECT id, project_id, table_id, subcompartment_id, data_json, inspector, created_at, updated_at
-                    FROM records
-                    WHERE subcompartment_id != ''
-                      AND id IN (
-                          SELECT id FROM records r2
-                          WHERE subcompartment_id != ''
-                          GROUP BY project_id, table_id, subcompartment_id
-                          HAVING MAX(updated_at)
-                      );
-                    DROP TABLE records;
-                    ALTER TABLE records_new RENAME TO records;
-                    CREATE INDEX idx_records_project_table ON records(project_id, table_id);
-                    CREATE INDEX idx_records_subcompartment ON records(subcompartment_id);
-                """)
+                if "subcompartment_id" in old_cols:
+                    # 旧库已有 subcompartment_id 列（一对一过渡期）→ 去重保留最新
+                    conn.executescript("""
+                        CREATE TABLE records_new (
+                            id                TEXT PRIMARY KEY,
+                            project_id        TEXT NOT NULL,
+                            table_id          TEXT NOT NULL,
+                            subcompartment_id TEXT NOT NULL,
+                            data_json         TEXT NOT NULL,
+                            inspector         TEXT DEFAULT '',
+                            created_at        TEXT NOT NULL,
+                            updated_at        TEXT NOT NULL,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            UNIQUE(project_id, table_id, subcompartment_id)
+                        );
+                        INSERT INTO records_new
+                            (id, project_id, table_id, subcompartment_id, data_json, inspector, created_at, updated_at)
+                        SELECT id, project_id, table_id, subcompartment_id, data_json, inspector, created_at, updated_at
+                        FROM records
+                        WHERE subcompartment_id != ''
+                          AND id IN (
+                              SELECT id FROM records r2
+                              WHERE subcompartment_id != ''
+                              GROUP BY project_id, table_id, subcompartment_id
+                              HAVING MAX(updated_at)
+                          );
+                        DROP TABLE records;
+                        ALTER TABLE records_new RENAME TO records;
+                    """)
+                else:
+                    # 最旧库无 subcompartment_id 列（纯一对多模型，数据不兼容）→ 直接重建空表
+                    conn.executescript("""
+                        DROP TABLE records;
+                        CREATE TABLE records (
+                            id                TEXT PRIMARY KEY,
+                            project_id        TEXT NOT NULL,
+                            table_id          TEXT NOT NULL,
+                            subcompartment_id TEXT NOT NULL,
+                            data_json         TEXT NOT NULL,
+                            inspector         TEXT DEFAULT '',
+                            created_at        TEXT NOT NULL,
+                            updated_at        TEXT NOT NULL,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            UNIQUE(project_id, table_id, subcompartment_id)
+                        );
+                    """)
+            # records 索引（新库或已迁移库才创建；旧库迁移块内已建）
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_records_project_table ON records(project_id, table_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_records_subcompartment ON records(subcompartment_id)")
             # 旧 prefilled 表停用删除（预填数据统一由 map_subcompartment_to_prefilled 实时映射）
             conn.execute("DROP TABLE IF EXISTS prefilled")
             # subcompartment_rows 新增 GDB 关联列（已有库兼容）
-            for col in ("gdb_id", "gdb_feature_id", "geom_geojson"):
+            for col in ("gdb_id", "gdb_feature_id", "geom_geojson", "gdb_layer",
+                        "project_name", "category"):
                 try:
                     conn.execute(f"ALTER TABLE subcompartment_rows ADD COLUMN {col} TEXT DEFAULT ''")
                 except sqlite3.OperationalError:
@@ -220,21 +237,30 @@ def init_db():
                         gdb_id               TEXT DEFAULT '',
                         gdb_feature_id       TEXT DEFAULT '',
                         geom_geojson         TEXT DEFAULT '',
+                        gdb_layer            TEXT DEFAULT '',
+                        project_name         TEXT DEFAULT '',
+                        category             TEXT DEFAULT '',
                         UNIQUE(batch_id, row_index),
                         FOREIGN KEY (batch_id) REFERENCES subcompartment_batches(id)
                     );
                     INSERT INTO subcompartment_rows_new
                         (id, batch_id, row_index, data_json, township, village,
                          forest_compartment, subcompartment, subcompartment_label,
-                         tending_area, gdb_id, gdb_feature_id, geom_geojson)
+                         tending_area, gdb_id, gdb_feature_id, geom_geojson, gdb_layer,
+                         project_name, category)
                     SELECT
                         id, batch_id, row_index, data_json, township, village,
                         MAX(0, COALESCE(CAST(forest_compartment AS INTEGER), 0)),
                         MAX(0, COALESCE(CAST(subcompartment AS INTEGER), 0)),
-                        MAX(0, COALESCE(CAST(forest_compartment AS INTEGER), 0)) || '-' ||
-                        MAX(0, COALESCE(CAST(subcompartment AS INTEGER), 0)),
+                        CASE WHEN MAX(0, COALESCE(CAST(forest_compartment AS INTEGER), 0)) > 0
+                             THEN MAX(0, COALESCE(CAST(forest_compartment AS INTEGER), 0)) || '-' ||
+                                  MAX(0, COALESCE(CAST(subcompartment AS INTEGER), 0))
+                             ELSE CAST(MAX(0, COALESCE(CAST(subcompartment AS INTEGER), 0)) AS TEXT)
+                        END,
                         tending_area,
-                        COALESCE(gdb_id, ''), COALESCE(gdb_feature_id, ''), COALESCE(geom_geojson, '')
+                        COALESCE(gdb_id, ''), COALESCE(gdb_feature_id, ''), COALESCE(geom_geojson, ''),
+                        COALESCE(gdb_layer, ''),
+                        COALESCE(project_name, ''), COALESCE(category, '')
                     FROM subcompartment_rows;
                     DROP TABLE subcompartment_rows;
                     ALTER TABLE subcompartment_rows_new RENAME TO subcompartment_rows;
@@ -254,6 +280,11 @@ def init_db():
                        SET subcompartment_label =
                            CAST(forest_compartment AS INTEGER) || '-' || CAST(subcompartment AS INTEGER);
                 """)
+            # 项目名称索引（按项目名称导出/调查筛选用）
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rows_project_name "
+                "ON subcompartment_rows(project_name)"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -348,19 +379,36 @@ def upsert_survey_row(pid, table_id, subcompartment_id, data, inspector=""):
             "inspector": inspector, "updated_at": now}
 
 
-def get_survey_rows(pid, table_id):
+def get_survey_rows(pid, table_id, project_name=None):
     """获取某项目某表所有小班的调查行（网格模式）。
+
+    Args:
+        pid: 项目 ID
+        table_id: 表 id（table1~table5）
+        project_name: 可选，按项目名称过滤（仅返回该项目名称下的小班调查行）
 
     Returns:
         list[dict]：每项含 id/subcompartment_id/data/inspector/updated_at
     """
     conn = _connect()
     try:
-        rows = conn.execute(
-            "SELECT * FROM records WHERE project_id=? AND table_id=? "
-            "ORDER BY updated_at",
-            (pid, table_id),
-        ).fetchall()
+        if project_name:
+            rows = conn.execute(
+                """SELECT r.* FROM records r
+                   JOIN subcompartment_rows sr ON r.subcompartment_id = sr.id
+                   LEFT JOIN gdb_files gf ON sr.gdb_id = gf.id
+                   LEFT JOIN subcompartment_batches sb ON sr.batch_id = sb.id
+                   WHERE r.project_id = ? AND r.table_id = ?
+                     AND (gf.project_id = ? OR sb.project_id = ?) AND sr.project_name = ?
+                   ORDER BY r.updated_at""",
+                (pid, table_id, pid, pid, project_name),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM records WHERE project_id=? AND table_id=? "
+                "ORDER BY updated_at",
+                (pid, table_id),
+            ).fetchall()
         result = []
         for r in rows:
             result.append({
@@ -567,25 +615,42 @@ def delete_batch(batch_id):
 
 
 def delete_project(project_id):
-    """物理删除项目及其所有关联数据（批次/小班/扩展/录入记录/预填/成员）。
+    """物理删除项目及其所有关联数据（GDB/批次/小班/扩展/录入记录/成员）。
 
     用于测试清理或管理员彻底删除项目。删除后数据不可恢复。
+    小班行同时覆盖 gdb_id 关联（新 GDB 上传流程）和 batch_id 关联（旧批次流程）。
     """
     with _lock:
         conn = _connect()
         try:
-            # 1. 收集该项目下所有 batch 的 row_ids
+            # 0. 项目名（用于兜底清理孤儿行）
+            proj = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+            proj_name = proj["name"] if proj else None
+            # 1. 收集该项目下所有小班行（gdb_id 或 batch_id 两种关联方式）
             row_ids = [r["id"] for r in conn.execute(
                 "SELECT sr.id FROM subcompartment_rows sr "
-                "JOIN subcompartment_batches sb ON sr.batch_id=sb.id "
-                "WHERE sb.project_id=?", (project_id,)
+                "WHERE sr.gdb_id IN (SELECT id FROM gdb_files WHERE project_id=?) "
+                "   OR sr.batch_id IN (SELECT id FROM subcompartment_batches WHERE project_id=?)",
+                (project_id, project_id)
             ).fetchall()]
+            # 兜底：gdb_files/batches 已删但行残留（孤儿行）的，按项目名清理
+            # （项目名全局唯一，同名行必属本项目或孤儿行）
+            if proj_name:
+                row_ids += [r["id"] for r in conn.execute(
+                    "SELECT id FROM subcompartment_rows WHERE project_name=? AND id NOT IN "
+                    "(SELECT sr.id FROM subcompartment_rows sr WHERE sr.gdb_id IN "
+                    "(SELECT id FROM gdb_files WHERE project_id<>?))",
+                    (proj_name, project_id)
+                ).fetchall()]
+            # 去重
+            row_ids = list(dict.fromkeys(row_ids))
             if row_ids:
                 ph = ",".join("?" * len(row_ids))
                 conn.execute(f"DELETE FROM subcompartment_extras WHERE subcompartment_row_id IN ({ph})", row_ids)
                 conn.execute(f"DELETE FROM subcompartment_rows WHERE id IN ({ph})", row_ids)
-            # 2. 删除该项目下所有批次
+            # 2. 删除该项目下所有批次、GDB 文件记录
             conn.execute("DELETE FROM subcompartment_batches WHERE project_id=?", (project_id,))
+            conn.execute("DELETE FROM gdb_files WHERE project_id=?", (project_id,))
             # 3. 删除录入记录、成员（prefilled 表已停用）
             conn.execute("DELETE FROM records WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM project_members WHERE project_id=?", (project_id,))
@@ -867,9 +932,15 @@ def _upsert_extras(conn, row_id, fields):
 # GDB 文件管理
 # ════════════════════════════════════════════
 
-def create_gdb_file(project_id, file_name, file_hash, layers, uploaded_by):
-    """创建 GDB 文件记录，返回 gdb dict。"""
-    gid = uuid.uuid4().hex[:12]
+def create_gdb_file(project_id, file_name, file_hash, layers, uploaded_by, gid=None):
+    """创建 GDB 文件记录，返回 gdb dict。
+
+    gid 必须与上传处理时使用的 gid 一致（目录名、subcompartment_rows.gdb_id
+    均以此为准），否则记录与实物/数据错位导致「查看图层/预览」404。
+    未传入时自动生成。
+    """
+    if not gid:
+        gid = uuid.uuid4().hex[:12]
     now = datetime.now().isoformat(timespec="seconds")
     with _lock:
         conn = _connect()
@@ -954,24 +1025,108 @@ def delete_gdb_file(gid):
             conn.close()
 
 
-def list_project_subcompartment_rows(pid):
+def list_project_subcompartment_rows(pid, project_name=None, category=None):
     """列出某项目下所有小班行（含 GDB 导入的 + 旧批次导入的）。
 
-    用于 user 端地图渲染：返回所有小班 + geom_geojson（若有）。
+    用于 user 端地图渲染 / 网格调查筛选：返回所有小班 + geom_geojson（若有）。
     GDB 导入的行 gdb_id 非空、batch_id 为空；旧 xlsx 导入的 batch_id 非空。
     两种来源合并返回。
+
+    Args:
+        pid: 项目 ID
+        project_name: 可选，按项目名称过滤（GDB 导入产生）
+        category: 可选，按分类过滤（人工造林/封山育林/退化林修复/水利水保/草原）
+    """
+    conn = _connect()
+    try:
+        sql = """SELECT sr.* FROM subcompartment_rows sr
+                 LEFT JOIN subcompartment_batches sb ON sr.batch_id = sb.id
+                 LEFT JOIN gdb_files gf ON sr.gdb_id = gf.id
+                 WHERE (sb.project_id = ? OR gf.project_id = ?)"""
+        params = [pid, pid]
+        if project_name:
+            sql += " AND sr.project_name = ?"
+            params.append(project_name)
+        if category:
+            sql += " AND sr.category = ?"
+            params.append(category)
+        sql += " ORDER BY sr.township, sr.forest_compartment, sr.subcompartment"
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def project_name_exists(project_id, project_name):
+    """判断某项目下是否已存在该项目名称（GDB 导入产生，project_name 非空）。
+
+    用于上传时「项目名称重复报错」校验。
+    """
+    if not project_name:
+        return False
+    conn = _connect()
+    try:
+        r = conn.execute(
+            """SELECT 1 FROM subcompartment_rows sr
+               LEFT JOIN gdb_files gf ON sr.gdb_id = gf.id
+               LEFT JOIN subcompartment_batches sb ON sr.batch_id = sb.id
+               WHERE (gf.project_id = ? OR sb.project_id = ?) AND sr.project_name = ?
+               LIMIT 1""",
+            (project_id, project_id, project_name),
+        ).fetchone()
+        return r is not None
+    finally:
+        conn.close()
+
+
+def project_name_exists_global(project_name):
+    """判断项目名是否全局已存在。
+
+    新上传流程：项目名由 GDB 自动读取并自动建项目，需全局唯一。
+    以 projects 表为真相源；孤儿 subcompartment_rows（gdb_files 已删）
+    不再阻塞上传。
+    """
+    if not project_name:
+        return False
+    conn = _connect()
+    try:
+        r = conn.execute(
+            "SELECT 1 FROM projects WHERE name=? LIMIT 1",
+            (project_name,)
+        ).fetchone()
+        return r is not None
+    finally:
+        conn.close()
+
+
+def get_project_names(pid):
+    """返回项目下所有项目名称及其分类清单（供前端两级选择 / 导出用）。
+
+    Returns:
+        [{"project_name", "categories": [分类...], "count"}, ...] 按名称+分类排序
     """
     conn = _connect()
     try:
         rows = conn.execute(
-            """SELECT sr.* FROM subcompartment_rows sr
-               LEFT JOIN subcompartment_batches sb ON sr.batch_id = sb.id
+            """SELECT sr.project_name, sr.category, COUNT(*) c
+               FROM subcompartment_rows sr
                LEFT JOIN gdb_files gf ON sr.gdb_id = gf.id
-               WHERE sb.project_id = ? OR gf.project_id = ?
-               ORDER BY sr.township, sr.forest_compartment, sr.subcompartment""",
+               LEFT JOIN subcompartment_batches sb ON sr.batch_id = sb.id
+               WHERE (gf.project_id = ? OR sb.project_id = ?) AND sr.project_name != ''
+               GROUP BY sr.project_name, sr.category
+               ORDER BY sr.project_name, sr.category""",
             (pid, pid),
         ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        agg = {}
+        for r in rows:
+            pn = r["project_name"]
+            cat = r["category"] or "未分类"
+            if pn not in agg:
+                agg[pn] = {"project_name": pn, "categories": [], "count": 0}
+            if cat not in agg[pn]["categories"]:
+                agg[pn]["categories"].append(cat)
+            agg[pn]["count"] += r["c"]
+        return list(agg.values())
     finally:
         conn.close()
 
@@ -980,105 +1135,186 @@ def list_project_subcompartment_rows(pid):
 # GDB → 小班行 物化导入
 # ════════════════════════════════════════════
 
-def import_gdb_subcompartments(gid, project_id, gdb_path, layer="抚育区"):
+def import_gdb_subcompartments(gid, project_id, gdb_path, layer=None, layer_meta=None, file_name=None):
     """将 GDB 图层解析后物化写入 subcompartment_rows。
 
-    每个图屧行 → 一条 subcompartment_rows 记录：
-      - data_json: GDB 该行全部属性（原样保留）
-      - township/village/forest_compartment/subcompartment: 从 GDB 字段提取
+    每个图层行 → 一条 subcompartment_rows 记录：
+      - data_json: GDB 该行全部属性（原样保留，并附 ``_layer``/``_category``/``_project_name``）
+      - township/village/forest_compartment/subcompartment: 按字段别名解析提取
       - gdb_id: 关联 gdb_files.id
-      - gdb_feature_id: GDB 的 New_ID（外键，关联调查记录）
+      - gdb_layer: 来源图层名（不同图层=不同调查类型）
+      - gdb_feature_id: 图层内的小班标识字段
       - geom_geojson: 该小班面 GeoJSON（WGS84，单 Feature）
+      - project_name: 项目名称（图层字段别名读取，回退文件名；见 layer_meta）
+      - category: 分类（图层名前缀关键词：人工造林/封山育林/退化林修复/水利水保/草原）
+
+    导入数据按 项目名称 + 分类 + 图层 三维切分：不同图层的 project_name/category
+    可不同（同一 GDB 内多个项目/分类并存）。
 
     Args:
         gid: gdb_files.id
         project_id: 项目 ID
         gdb_path: GDB 文件路径
-        layer: 图层名（默认「抚育区」）
+        layer: 指定图层名；None 表示导入全部图层
+        layer_meta: {layer_name: {"category": str, "project_name": str}} 预分类结果；
+                    为空时按图层名前缀 + 图层字段实时推导。
+        file_name: 上传文件名（project_name 回退用）
 
     Returns:
-        {"imported": N, "skipped": M}
+        {"layers": {layer: {"imported": n, "skipped": m, "category": c, "project_name": p}},
+         "imported": N, "skipped": M, "project_names": [..]}
     """
     import json as _json
     from survey.core import gdb as G
 
-    gdf = G.read_layer(gdb_path, layer)
-    gdf84 = G.to_wgs84(gdf)
+    if layer is None:
+        layer_names = [l["name"] for l in G.list_layers(gdb_path)]
+    else:
+        layer_names = [layer]
 
-    imported = 0
-    skipped = 0
-    now = datetime.now().isoformat(timespec="seconds")
+    per_layer = {}
+    total_imported = 0
+    total_skipped = 0
+    project_names_seen = []
 
     with _lock:
         conn = _connect()
         try:
-            for idx, row in gdf84.iterrows():
-                # 提取属性（排除 geometry）
-                props = {}
-                for col in gdf84.columns:
-                    if col == "geometry":
+            for lname in layer_names:
+                # 分类 + 项目名称：优先用预分类结果，否则实时推导
+                meta = (layer_meta or {}).get(lname, {})
+                category = meta.get("category") or G.classify_layer(lname)
+                layer_pn = meta.get("project_name")
+                if not layer_pn:
+                    layer_pn = G.read_project_name(gdb_path, lname)
+                if not layer_pn:
+                    layer_pn = G.derive_project_name(file_name) if file_name else ""
+                if layer_pn and layer_pn not in project_names_seen:
+                    project_names_seen.append(layer_pn)
+
+                gdf = G.read_layer(gdb_path, lname)
+                gdf84 = G.to_wgs84(gdf)
+                cols = list(gdf84.columns)
+
+                # 预解析本图层候选别名列（逐行再按实际值挑选非空列）
+                f_sub_cands = [a for a in G.GDB_FIELD_ALIASES["subcompartment"] if a in cols] or \
+                              [c for c in cols for a in G.GDB_FIELD_ALIASES["subcompartment"] if a and (a in c or c in a)]
+                f_town_cands = [a for a in G.GDB_FIELD_ALIASES["township"] if a in cols] or \
+                               [c for c in cols for a in G.GDB_FIELD_ALIASES["township"] if a and (a in c or c in a)]
+                f_vill_cands = [a for a in G.GDB_FIELD_ALIASES["village"] if a in cols] or \
+                               [c for c in cols for a in G.GDB_FIELD_ALIASES["village"] if a and (a in c or c in a)]
+                f_for_cands = [a for a in G.GDB_FIELD_ALIASES["forest_compartment"] if a in cols] or \
+                              [c for c in cols for a in G.GDB_FIELD_ALIASES["forest_compartment"] if a and (a in c or c in a)]
+                f_area_cands = [a for a in G.GDB_FIELD_ALIASES["area"] if a in cols] or \
+                               [c for c in cols for a in G.GDB_FIELD_ALIASES["area"] if a and (a in c or c in a)]
+                f_fid_cands = [a for a in G.GDB_FIELD_ALIASES["feature_id"] if a in cols] or \
+                              [c for c in cols for a in G.GDB_FIELD_ALIASES["feature_id"] if a and (a in c or c in a)]
+
+                imported = 0
+                skipped = 0
+                base_idx = total_imported + total_skipped
+                for idx, row in gdf84.iterrows():
+                    # 提取属性（排除 geometry）
+                    props = {}
+                    for col in cols:
+                        if col == "geometry":
+                            continue
+                        v = row[col]
+                        if v is None or (hasattr(v, "__float__") and v != v):
+                            props[col] = ""
+                        else:
+                            props[col] = str(v)
+                    # 记录来源图层 / 分类 / 项目名称（不同图层=不同调查信息）
+                    props["_layer"] = lname
+                    props["_category"] = category
+                    props["_project_name"] = layer_pn
+
+                    # 逐行按实际值挑选非空别名列
+                    f_sub = G._pick_candidate(props, f_sub_cands)
+                    f_town = G._pick_candidate(props, f_town_cands)
+                    f_vill = G._pick_candidate(props, f_vill_cands)
+                    f_for = G._pick_candidate(props, f_for_cands)
+                    f_area = G._pick_candidate(props, f_area_cands)
+                    f_fid = G._pick_candidate(props, f_fid_cands)
+
+                    # 林班/小班规范化为 unsigned int（根治 "1.0" 问题）
+                    forest_compartment = _to_uint(props.get(f_for, "")) if f_for else 0
+                    subcompartment = _to_uint(props.get(f_sub, "")) if f_sub else 0
+                    if f_for:
+                        props["林班"] = forest_compartment
+                    if f_sub:
+                        props["小班"] = subcompartment
+
+                    # 提取定位字段
+                    township = props.get(f_town, "") if f_town else ""
+                    village = props.get(f_vill, "") if f_vill else ""
+                    gdb_feature_id = props.get(f_fid, "") if f_fid else ""
+
+                    if not subcompartment:
+                        skipped += 1
                         continue
-                    v = row[col]
-                    if v is None or (hasattr(v, "__float__") and v != v):
-                        props[col] = ""
-                    else:
-                        props[col] = str(v)
 
-                # 林班/小班规范化为 unsigned int（根治 "1.0" 问题）
-                forest_compartment = _to_uint(props.get("林班", ""))
-                subcompartment = _to_uint(props.get("小班", ""))
-                props["林班"] = forest_compartment
-                props["小班"] = subcompartment
+                    # 标签：有林班时「林班-小班」，无林班仅显示小班号（不出现 0- 前缀）
+                    subcompartment_label = (
+                        f"{forest_compartment}-{subcompartment}" if forest_compartment
+                        else f"{subcompartment}"
+                    )
 
-                # 提取定位字段
-                township = props.get("乡镇", "")
-                village = props.get("村", "")
-                gdb_feature_id = props.get("New_ID", "")
+                    # 提取面积（别名解析：小班面/小班面积/经营面/经营面积/上报面积/抚育面积）
+                    tending_area = 0.0
+                    if f_area:
+                        raw = props.get(f_area, "")
+                        if raw:
+                            try:
+                                tending_area = float(raw)
+                            except (ValueError, TypeError):
+                                pass
 
-                if not subcompartment:
-                    skipped += 1
-                    continue
-
-                subcompartment_label = f"{forest_compartment}-{subcompartment}"
-
-                # 提取面积（优先「小班面」>「经营面」>「抚育面积」）
-                tending_area = 0.0
-                for area_key in ("小班面", "经营面", "抚育面积", "小班面积"):
-                    raw = props.get(area_key, "")
-                    if raw:
+                    # 生成单小班面 GeoJSON
+                    geom = row.geometry
+                    geom_geojson = ""
+                    if geom is not None:
                         try:
-                            tending_area = float(raw)
-                            break
-                        except (ValueError, TypeError):
-                            pass
+                            geom_geojson = _json.dumps({
+                                "type": "Feature",
+                                "geometry": _json.loads(_json.dumps(geom.__geo_interface__)),
+                                "properties": {
+                                    "New_ID": gdb_feature_id,
+                                    "小班": subcompartment,
+                                    "layer": lname,
+                                },
+                            }, ensure_ascii=False)
+                        except Exception:
+                            geom_geojson = ""
 
-                # 生成单小班面 GeoJSON
-                geom = row.geometry
-                geom_geojson = ""
-                if geom is not None:
-                    try:
-                        geom_geojson = _json.dumps({
-                            "type": "Feature",
-                            "geometry": _json.loads(_json.dumps(geom.__geo_interface__)),
-                            "properties": {"New_ID": gdb_feature_id, "小班": subcompartment},
-                        }, ensure_ascii=False)
-                    except Exception:
-                        geom_geojson = ""
-
-                row_id = uuid.uuid4().hex[:12]
-                conn.execute(
-                    """INSERT INTO subcompartment_rows
-                       (id, batch_id, row_index, data_json, township, village,
-                        forest_compartment, subcompartment, subcompartment_label,
-                        tending_area, gdb_id, gdb_feature_id, geom_geojson)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (row_id, "", idx, _json.dumps(props, ensure_ascii=False),
-                     township, village, forest_compartment, subcompartment,
-                     subcompartment_label, tending_area, gid, gdb_feature_id, geom_geojson),
-                )
-                imported += 1
+                    row_id = uuid.uuid4().hex[:12]
+                    conn.execute(
+                        """INSERT INTO subcompartment_rows
+                           (id, batch_id, row_index, data_json, township, village,
+                            forest_compartment, subcompartment, subcompartment_label,
+                            tending_area, gdb_id, gdb_feature_id, geom_geojson, gdb_layer,
+                            project_name, category)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (row_id, gid, base_idx + idx,
+                         _json.dumps(props, ensure_ascii=False),
+                         township, village, forest_compartment, subcompartment,
+                         subcompartment_label, tending_area, gid, gdb_feature_id,
+                         geom_geojson, lname, layer_pn, category),
+                    )
+                    imported += 1
+                total_imported += imported
+                total_skipped += skipped
+                per_layer[lname] = {
+                    "imported": imported, "skipped": skipped,
+                    "category": category, "project_name": layer_pn,
+                }
             conn.commit()
         finally:
             conn.close()
 
-    return {"imported": imported, "skipped": skipped}
+    return {
+        "layers": per_layer,
+        "imported": total_imported,
+        "skipped": total_skipped,
+        "project_names": project_names_seen,
+    }

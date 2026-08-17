@@ -47,7 +47,10 @@ def main():
     print(f"  认证: 已禁用（本地开发模式）")
     print("=" * 60)
 
-    root.run(host="0.0.0.0", port=port, debug=True)
+    # 注意：必须关闭 reloader。watchdog 会监视 data/ 目录，上传 GDB 时
+    # 写入的 upload.zip 触发自动重启，导致请求中途被掐断（连接 reset）→
+    # 浏览器表现为「上传失败」。保留 debug 以输出错误栈，但不自动重载。
+    root.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)
 
 
 if __name__ == "__main__":

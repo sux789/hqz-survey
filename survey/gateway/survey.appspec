@@ -1,0 +1,9 @@
+code: survey
+name: 林业野外调查即时录入系统
+prefix: /survey
+root: /home/www/bibook_deploy/apps/survey
+factory: survey.user.app:create_app
+static_url_path: /survey/static
+auth: global
+description: 林业野外调查五表即时录入
+enabled: true

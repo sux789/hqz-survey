@@ -12,11 +12,134 @@ import shutil
 import zipfile
 from pathlib import Path
 
-import pyogrio
-import geopandas as gpd
+# pyogrio / geopandas 延迟到函数内导入：服务器未装时不影响 app 加载
 
 # GDB 存储根目录
 GDB_STORAGE = Path(__file__).resolve().parent.parent.parent / "data" / "gdb"
+
+
+# ── GDB 图层字段别名解析 ──
+# 不同 GDB 图层的字段名差异很大（如 乡镇/乡、村/村委会、小班/新小班号/原小班号、
+# 林班/小班面 等），统一用别名映射为内部定位字段，避免导入时整层落空。
+GDB_FIELD_ALIASES = {
+    "township": ["乡镇", "乡", "县市", "县", "州（市）", "州(市)", "州"],
+    "village": ["村", "村委会", "村民委员会"],
+    "forest_compartment": ["林班"],
+    "subcompartment": ["小班", "新小班号", "原小班号", "调查小班号", "调查号"],
+    "area": ["小班面", "小班面积", "经营面", "经营面积", "上报面积", "抚育面积"],
+    "feature_id": ["New_ID", "调查小班号", "新小班号", "原小班号", "调查号",
+                   "FID_封山育林", "FID_退化林修复", "FID_人工造林"],
+}
+
+# ── GDB 图层 → 分类（验收表）映射 ──
+# 图层名以这些关键词开头 → 归入对应分类（与 schema 五表一一对应）。
+# 顺序即「分类优先级」：先匹配者生效（关键词互不前缀重叠，顺序无影响）。
+GDB_CATEGORY_KEYWORDS = ["人工造林", "封山育林", "退化林修复", "水利水保", "草原"]
+
+# 分类 → schema 表 id（导入/导出据此落表）
+GDB_CATEGORY_TO_TABLE = {
+    "人工造林": "table1",
+    "封山育林": "table2",
+    "退化林修复": "table3",
+    "水利水保": "table4",
+    "草原": "table5",
+}
+
+# 项目名称字段别名（图层属性中读取，无则回退文件名）
+GDB_PROJECT_NAME_ALIASES = ["项目名称", "项目", "工程名称", "工程", "项目名"]
+
+
+def classify_layer(layer_name):
+    """按图层名前缀关键词判定所属分类。
+
+    Args:
+        layer_name: GDB 图层名
+
+    Returns:
+        分类关键词（人工造林/封山育林/退化林修复/水利水保/草原）或 None（未命中）
+    """
+    if not layer_name:
+        return None
+    for kw in GDB_CATEGORY_KEYWORDS:
+        if layer_name.startswith(kw):
+            return kw
+    return None
+
+
+def read_project_name(gdb_path, layer):
+    """从图层属性字段中读取项目名称（别名匹配），无则返回 None。
+
+    取该图层前若干行中第一个有非空值的别名列值；图层内项目名通常恒定。
+    """
+    try:
+        gdf = read_layer(gdb_path, layer, max_features=50)
+    except Exception:
+        return None
+    cols = [c for c in gdf.columns if c != "geometry"]
+    cands = [c for c in GDB_PROJECT_NAME_ALIASES if c in cols]
+    if not cands:
+        return None
+    for c in cands:
+        for v in gdf[c].dropna():
+            s = str(v).strip()
+            if s and s not in ("None", "nan", "NaN"):
+                return s
+    return None
+
+
+def derive_project_name(file_name):
+    """回退：用上传文件名（去扩展名）作为项目名称。"""
+    name = Path(file_name).stem if file_name else "未命名项目"
+    return name
+
+
+def resolve_gdb_field(columns, kind, props=None):
+    """在图层字段列中按别名解析内部字段名。
+
+    Args:
+        columns: 图层实际字段名 list
+        kind: GDB_FIELD_ALIASES 的 key（township/village/forest_compartment/...）
+        props: 可选，某行属性 dict。提供时优先返回「有非空值」的别名列，
+               避免选中名为 小班 但整列为空的列（如本层实际 ID 在 调查小班号）。
+
+    Returns:
+        命中的原始字段名（str）或 None
+    """
+    aliases = GDB_FIELD_ALIASES.get(kind, [])
+    # 精确命中
+    matched = [a for a in aliases if a in columns]
+    if not matched:
+        # 模糊兜底：子串包含
+        for a in aliases:
+            for c in columns:
+                if a and (a in c or c in a):
+                    matched.append(c)
+    if not matched:
+        return None
+    if props is None:
+        return matched[0]
+    # 取值优先：挑有非空/非 NaN 值的列
+    def _nonempty(col):
+        v = props.get(col, "")
+        s = str(v).strip()
+        return s not in ("", "None", "nan", "NaN")
+    filled = [c for c in matched if _nonempty(c)]
+    return filled[0] if filled else matched[0]
+
+
+def _pick_candidate(props, candidates):
+    """从候选列名列表中，挑出当前行有非空值的那一列；都没有则返回首列或 None。
+
+    用于导入时逐行解析（同名空列 vs 异名实值列，如 小班 空但 调查小班号 有值）。
+    """
+    if not candidates:
+        return None
+    for c in candidates:
+        v = props.get(c, "")
+        s = str(v).strip()
+        if s not in ("", "None", "nan", "NaN"):
+            return c
+    return candidates[0]
 
 
 def list_layers(gdb_path):
@@ -26,6 +149,7 @@ def list_layers(gdb_path):
         [{"name", "geometry_type", "row_count", "field_count"}, ...]
     """
     layers = []
+    import pyogrio
     for row in pyogrio.list_layers(str(gdb_path)):
         name = row[0]
         geom_type = row[1] if len(row) > 1 else ""
@@ -53,6 +177,7 @@ def layer_fields(gdb_path, layer):
     Returns:
         [{"name", "dtype"}, ...]
     """
+    import pyogrio
     gdf = pyogrio.read_dataframe(str(gdb_path), layer=layer, max_features=1)
     fields = []
     for col in gdf.columns:
@@ -64,6 +189,7 @@ def layer_fields(gdb_path, layer):
 
 def read_layer(gdb_path, layer, max_features=None):
     """读取图层为 GeoDataFrame。"""
+    import pyogrio
     kwargs = {"layer": layer}
     if max_features:
         kwargs["max_features"] = max_features
@@ -170,10 +296,59 @@ def to_md(gdb_path, out_dir):
         f.write("\n".join(readme_lines) + "\n")
 
 
-def save_gdb_upload(upload_file, project_id, gid):
+def find_gdb_dirs(gdb_dir):
+    """在一二层目录内找 .gdb 目录（不深层递归）。
+
+    Args:
+        gdb_dir: 解压根目录 Path
+
+    Returns:
+        [.gdb 目录 Path, ...]（一二层命中即止，不向下深挖）
+    """
+    found = []
+    for p in gdb_dir.iterdir():
+        if p.is_dir() and p.suffix == ".gdb":
+            found.append(p)
+        elif p.is_dir():
+            # 第二层
+            for p2 in p.iterdir():
+                if p2.is_dir() and p2.suffix == ".gdb":
+                    found.append(p2)
+    return found
+
+
+def scan_classified_layers(gdb_path):
+    """扫描 GDB 图层，按分类关键词筛选。
+
+    Returns:
+        {
+          classified: [{name, category, row_count}],  # 命中分类关键词的图层
+          skipped:    [{name, reason:"非分类图层"}]    # 未命中的图层（提示不读取）
+        }
+    """
+    classified = []
+    skipped = []
+    try:
+        layers = list_layers(gdb_path)
+    except Exception:
+        return {"classified": [], "skipped": []}
+    for l in layers:
+        cat = classify_layer(l["name"])
+        if cat:
+            classified.append({
+                "name": l["name"],
+                "category": cat,
+                "row_count": l.get("row_count", 0),
+            })
+        else:
+            skipped.append({"name": l["name"], "reason": "非分类图层"})
+    return {"classified": classified, "skipped": skipped}
+
+
+def save_gdb_upload(upload_file, gid):
     """保存上传的 GDB 文件到存储目录。
 
-    GDB 可以是目录（已解压）或 zip 包。
+    GDB 以 zip 包上传，解压后在一二层目录内查找 .gdb 目录。
 
     Returns:
         {"gid", "path", "gdb_dir"}
@@ -203,8 +378,8 @@ def save_gdb_upload(upload_file, project_id, gid):
             zip_path.unlink()
             raise ValueError("仅支持 .zip 格式的 GDB 压缩包")
 
-    # 找到 .gdb 目录
-    gdb_paths = list(gdb_dir.rglob("*.gdb"))
+    # 在一二层目录内找 .gdb 目录
+    gdb_paths = find_gdb_dirs(gdb_dir)
     if not gdb_paths:
         raise ValueError("压缩包内未找到 .gdb 目录")
     gdb_path = gdb_paths[0]
@@ -228,7 +403,7 @@ def get_gdb_path(gid):
     gdb_dir = GDB_STORAGE / gid
     if not gdb_dir.exists():
         return None
-    gdb_paths = list(gdb_dir.rglob("*.gdb"))
+    gdb_paths = find_gdb_dirs(gdb_dir)
     return str(gdb_paths[0]) if gdb_paths else None
 
 

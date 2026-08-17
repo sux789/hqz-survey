@@ -56,7 +56,7 @@ function toast(msg, ms = 2000) {
 async function apiFetch(url, options) {
   const res = await fetch(url, options);
   if (res.status === 401) {
-    window.location.href = '/forest/login?next=/admin/';
+    window.location.href = '/forest/login?next=/survey-admin/';
     throw new Error('未登录，正在跳转登录页…');
   }
   return res;
@@ -166,13 +166,12 @@ async function loadGdbTab() {
     <div class="admin-form">
       <h4>上传 GDB 文件（zip 格式）</h4>
       <div class="admin-form-row">
-        <input id="gdbProjInput" class="f-input" placeholder="项目名称 *（输入后自动校验是否已存在）" style="flex:1 1 240px" autocomplete="off">
         <input type="file" id="gdbFile" accept=".zip" class="f-input" style="flex:1 1 auto; min-width:200px">
         <button class="btn-confirm admin-submit" data-action="gdb-upload">上传</button>
       </div>
-      <div id="gdbProjStatus" class="upload-hint"></div>
+      <div id="gdbUploadResult"></div>
       <div class="upload-hint">
-        ⚠ 要求：上传 .zip 格式的 GDB 文件包。上传后可查看图层、预览字段、生成 GeoJSON。<b>项目与 GDB 为一对一关系</b>：输入新名称将自动创建项目并绑定本次 GDB；若项目已存在则直接绑定（已有 GDB 时不可重复上传）。
+        ⚠ 上传 .zip 格式的 GDB 文件包。<b>项目名自动从 GDB 图层属性读取</b>，无需手动输入。系统按图层名分类（人工造林/封山育林/退化林修复/水利水保/草原），非分类图层不读取。
       </div>
     </div>
     <div id="gdbListWrap"></div>
@@ -219,78 +218,46 @@ async function loadGdbFiles() {
   `;
 }
 
-// 校验项目名称输入：是否已存在、是否已有 GDB（一对一约束）
-function checkProjectName(rawName) {
-  const statusEl = qs('#gdbProjStatus');
-  if (!statusEl) return;
-  const name = (rawName || '').trim();
-  if (!name) {
-    statusEl.textContent = '';
-    statusEl.className = 'upload-hint';
-    return;
-  }
-  const existing = state.projects.find(p => p.name === name);
-  if (existing) {
-    const hasGdb = state.gdbFiles.some(f => f.project_id === existing.id);
-    if (hasGdb) {
-      statusEl.textContent = `⚠ 项目「${name}」已存在，且已有 GDB（一对一关系，不可重复上传）`;
-      statusEl.className = 'upload-hint warn-text';
-    } else {
-      statusEl.textContent = `项目「${name}」已存在，将把本次 GDB 关联到该项目`;
-      statusEl.className = 'upload-hint ok-text';
-    }
-  } else {
-    statusEl.textContent = `将创建新项目：「${name}」，并关联本次上传的 GDB（一对一）`;
-    statusEl.className = 'upload-hint ok-text';
-  }
-}
-
 async function uploadGdb() {
-  const name = (qs('#gdbProjInput') ? qs('#gdbProjInput').value : '').trim();
   const fi = qs('#gdbFile');
-  if (!name) { toast('请输入项目名称'); return; }
   if (!fi || !fi.files || !fi.files[0]) { toast('请选择 zip 文件'); return; }
-
-  // 确定 project_id：存在则复用，不存在则创建（保证一对一绑定）
-  let pid = null;
-  const existing = state.projects.find(p => p.name === name);
-  if (existing) {
-    const hasGdb = state.gdbFiles.some(f => f.project_id === existing.id);
-    if (hasGdb) {
-      toast('该项目已有 GDB，遵循一对一关系，无法重复上传');
-      return;
-    }
-    pid = existing.id;
-  } else {
-    try {
-      const cj = await fetchJSON('api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, township: '' }),
-      });
-      pid = cj.id;
-      // 同步到本地状态，避免重复创建
-      state.projects.push(cj);
-    } catch (e) {
-      toast('创建项目失败：' + e.message, 3000);
-      return;
-    }
-  }
 
   const fd = new FormData();
   fd.append('file', fi.files[0]);
-  fd.append('project_id', pid);
   toast('正在上传…', 1500);
   try {
     const res = await apiFetch('api/gdb/upload', { method: 'POST', body: fd });
     const j = await res.json();
-    if (!res.ok) { toast('上传失败：' + (j.error || res.status), 3000); return; }
-    toast(`上传成功，${(j.layers || []).length} 个图层`);
+    if (!res.ok) {
+      toast('上传失败：' + (j.error || res.status), 4000);
+      return;
+    }
+    // 展示结果卡片（新返回格式：project/categories/layers/skipped_layers/imported）
+    const resultEl = qs('#gdbUploadResult');
+    const proj = j.project || {};
+    const cats = j.categories || [];
+    const skipped = j.skipped_layers || [];
+    const imported = j.imported || 0;
+    const layers = j.layers || {};
+    const layerDetail = Object.keys(layers)
+      .map(ln => `${escapeHtml(ln)}（${escapeHtml(layers[ln].category || '—')}）: 导入 ${layers[ln].imported || 0}`)
+      .join('<br>');
+    const skippedHtml = skipped.length
+      ? `<div class="upload-hint warn-text">未读取图层（非分类）：${skipped.map(s => escapeHtml(s.name)).join('、')}</div>`
+      : '';
+    if (resultEl) {
+      resultEl.className = 'upload-result-card';
+      resultEl.innerHTML = `
+        <div class="upload-result-title">✅ 上传成功</div>
+        <div class="upload-result-row"><b>项目：</b>${escapeHtml(proj.name || '—')}（自动创建）</div>
+        <div class="upload-result-row"><b>分类：</b>${cats.map(escapeHtml).join('、') || '—'}</div>
+        <div class="upload-result-row"><b>导入小班：</b>${imported} 条</div>
+        ${layerDetail ? `<div class="upload-result-detail">${layerDetail}</div>` : ''}
+        ${skippedHtml}
+      `;
+    }
+    toast(`上传成功：项目「${proj.name || ''}」，共导入 ${imported} 条小班`, 3500);
     fi.value = '';
-    const inp = qs('#gdbProjInput');
-    if (inp) inp.value = '';
-    const statusEl = qs('#gdbProjStatus');
-    if (statusEl) { statusEl.textContent = ''; statusEl.className = 'upload-hint'; }
     await loadGdbFiles();
   } catch (e) {
     toast('上传失败：' + e.message, 3000);
@@ -910,13 +877,6 @@ app.addEventListener('click', async (e) => {
     case 'pf-cancel-edit':
       renderPrefilledEditForm();
       break;
-  }
-});
-
-// input 事件（项目名实时校验）
-app.addEventListener('input', (e) => {
-  if (e.target.id === 'gdbProjInput') {
-    checkProjectName(e.target.value);
   }
 });
 

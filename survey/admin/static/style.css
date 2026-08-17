@@ -985,6 +985,21 @@ input, select, textarea, button {
 .upload-hint.ok-text { border-left-color: var(--green-l); color: var(--green-d); }
 .upload-hint.warn-text { border-left-color: var(--danger); color: var(--danger); background: #fdeaea; }
 
+/* ── 上传结果卡片 ── */
+.upload-result-card {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--green-l);
+  border-left: 4px solid var(--green-l);
+  border-radius: 8px;
+  background: #f0faf3;
+  font-size: 14px;
+  line-height: 1.7;
+}
+.upload-result-title { font-size: 15px; font-weight: 700; color: var(--green-d); margin-bottom: 6px; }
+.upload-result-row { color: var(--text); }
+.upload-result-detail { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); color: var(--text-2); font-size: 13px; }
+
 /* ── 小班扩展面板 ── */
 .sc-panel-modal {
   max-width: 460px;
