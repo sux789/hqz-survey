@@ -84,8 +84,27 @@ function toast(msg, ms = 1800) {
 }
 
 // ── 原生权限（Capacitor App 内）──
+// 等待 Capacitor Bridge 注入完成（远程 URL 模式下 bridge 可能在页面脚本之后才就绪）
+function waitForCapacitor(timeout = 3000) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    (function poll() {
+      if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function') {
+        resolve(true);
+        return;
+      }
+      if (Date.now() - start >= timeout) { resolve(false); return; }
+      setTimeout(poll, 80);
+    })();
+  });
+}
 function isApp() {
-  return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+  // 多重特征：isNativePlatform 或 原生插件存在（AppPermissions 仅在原生壳注册）
+  return !!(
+    window.Capacitor &&
+    ((typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) ||
+     (window.Capacitor.Plugins && window.Capacitor.Plugins.AppPermissions))
+  );
 }
 function permPlugin() {
   return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.AppPermissions) || null;
@@ -196,6 +215,8 @@ function computeGroups(fields) {
 
 // ── 初始化 ──
 async function init() {
+  // 远程 URL 模式下，Capacitor Bridge 可能在页面脚本之后才注入；先等待就绪再判断
+  await waitForCapacitor(3000);
   // 仅允许在宏芊紫验收APP（Capacitor 原生壳）内运行，浏览器打开直接拦截
   if (!isApp()) {
     renderBrowserBlock();
