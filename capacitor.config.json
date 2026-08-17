@@ -5,6 +5,7 @@
   "backgroundColor": "#2e7d32",
   "server": {
     "url": "https://forest.bibook.top/survey",
+    "allowNavigation": ["forest.bibook.top", "www.bibook.top"],
     "cleartext": false
   }
 }
