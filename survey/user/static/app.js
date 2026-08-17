@@ -35,6 +35,7 @@ const state = {
   gridTable: 'table1',    // 网格当前表
   gridTownship: '',       // 网格乡镇筛选（空=全部）
   gridVillage: '',        // 网格村筛选（空=全部）
+  gridCheckin: '',        // 网格打卡状态筛选（''=全部 done=已打卡 undone=未打卡）
   _grid: null,            // jspreadsheet 实例
   _gridSurveyMap: {},     // {subcompartment_id: data} 已有调查数据
   subcompartmentPrefilledMap: {}, // {sc_id: prefilled_dict} 网格黄色列取值
@@ -76,11 +77,15 @@ function escapeHtml(s) {
 }
 
 function toast(msg, ms = 1800) {
+  // 清掉旧 toast，避免多条叠屏不消失
+  document.querySelectorAll('.toast').forEach(el => el.remove());
   const t = document.createElement('div');
   t.className = 'toast';
   t.textContent = msg;
   document.body.appendChild(t);
+  // 定时移除 + 兜底二次清理（remove 幂等）
   setTimeout(() => t.remove(), ms);
+  setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, ms + 800);
 }
 
 // ── 原生权限（Capacitor App 内）──
@@ -382,7 +387,7 @@ function renderTopBar() {
     </div>
     <div class="topbar-right">
       <button class="btn-icon help-btn" data-action="open-help" title="使用说明">?</button>
-      ${(state.view === 'survey' || state.view === 'survey_grid') ? '<button class="btn-export" data-action="export">导出</button>' : ''}
+      ${(state.view === 'survey' || state.view === 'survey_grid') ? '<button class="btn-export" data-action="export">导出</button><button class="btn-export" data-action="export-tracks" title="导出项目全部轨迹（GPX，按小班打包 ZIP）">轨迹</button>' : ''}
       <span class="user-display" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</span>
       <button class="btn-logout" data-action="logout" title="登出">登出</button>
     </div>
@@ -785,6 +790,8 @@ async function goToSurveyGrid() {
   }
   // 按分类过滤小班
   await loadGridScRows();
+  // 预载当前表全部调查数据（打卡状态筛选用：样地坐标x/y 非空 = 已打卡）
+  await loadGridSubcompartmentData();
   state.view = 'survey_grid';
   renderApp();
 }
@@ -840,14 +847,25 @@ function renderGridToolbar() {
     `<option value="${escapeHtml(v)}" ${v === state.gridVillage ? 'selected' : ''}>${escapeHtml(v)}</option>`
   ).join('');
 
-  // 小班下拉（级联到最后）
+  // 小班下拉（级联到最后；已选小班被筛出时仍保留其选项）
+  // value 用小班行主键 id：多林班/跨村会出现同号小班，号码不唯一，id 才能精确定位
   const scRows = getGridFilteredRows();
   const scOpts = scRows.map(r =>
     `<option value="${escapeHtml(r.id)}" ${state.gridSubcompartment && r.id === state.gridSubcompartment.id ? 'selected' : ''}>${escapeHtml(r.subcompartment_label || '')}</option>`
   ).join('');
+  if (state.gridSubcompartment && !scRows.some(r => r.id === state.gridSubcompartment.id)) {
+    scOpts += `<option value="${escapeHtml(state.gridSubcompartment.id)}" selected>${escapeHtml(state.gridSubcompartment.subcompartment_label || '')}</option>`;
+  }
   const scHtml = `<select id="gridSubcompartmentFilter" data-action="grid-filter-subcompartment" title="小班">
     <option value="">选择小班</option>
     ${scOpts}
+  </select>`;
+
+  // 打卡状态筛选（样地坐标x/y 均非空 = 已打卡）
+  const ckHtml = `<select id="gridCheckinFilter" data-action="grid-filter-checkin" title="打卡状态">
+    <option value="">打卡状态</option>
+    <option value="done" ${state.gridCheckin === 'done' ? 'selected' : ''}>已打卡</option>
+    <option value="undone" ${state.gridCheckin === 'undone' ? 'selected' : ''}>未打卡</option>
   </select>`;
 
   // 操作按钮（选定小班后显示）
@@ -870,18 +888,27 @@ function renderGridToolbar() {
       <option value="">全部村</option>
       ${vfHtml}
     </select>
+    ${ckHtml}
     ${scHtml}
     ${scBtns}
     <span class="grid-hint">${hint}</span>
   </div>`;
 }
 
-// 按分类+县+乡+村过滤后的小班列表
+// 按分类+县+乡+村+打卡状态过滤后的小班列表
 function getGridFilteredRows() {
   let rows = state.gridScRows || state.scAllRows || [];
   if (state.gridTownship) rows = rows.filter(r => r.township === state.gridTownship);
   if (state.gridVillage) rows = rows.filter(r => r.village === state.gridVillage);
+  if (state.gridCheckin) rows = rows.filter(r => isScCheckedIn(r) === (state.gridCheckin === 'done'));
   return rows;
+}
+
+// 打卡状态判定：样地坐标x/y 都不为空 = 已打卡
+function isScCheckedIn(r) {
+  const d = (state._gridSurveyMap || {})[r.id] || {};
+  return d.sample_coord_x != null && d.sample_coord_x !== '' &&
+         d.sample_coord_y != null && d.sample_coord_y !== '';
 }
 
 function distinctVals(rows, key) {
@@ -899,9 +926,9 @@ async function bindSurveyGridPage() {
   await renderSurveyForm();
 }
 
-// 加载选定小班的当前表调查数据
+// 加载当前表全部调查数据（选定小班编辑 + 打卡状态筛选共用）
 async function loadGridSubcompartmentData() {
-  if (!state.gridSubcompartment || !state.gridTable) { state._gridSurveyMap = {}; return; }
+  if (!state.project || !state.gridTable) { state._gridSurveyMap = {}; return; }
   try {
     const url = `api/projects/${state.project.id}/survey/${state.gridTable}/rows`;
     const j = await fetchJSON(url);
@@ -920,17 +947,19 @@ function computeFieldValue(formula, data) {
     case 't1_avg_survival': {
       if (!sVals.length) return '';
       const sum = sVals.reduce((s, v) => s + Number(v), 0);
-      return (sum / sVals.length).toFixed(2);
+      // 平均成活株数取整（与导出模板公式一致）
+      return String(Math.round(sum / sVals.length));
     }
     case 't1_avg_survival_rate': {
       if (!sVals.length) return '';
       const sum = sVals.reduce((s, v) => s + Number(v), 0);
-      const avg = sum / sVals.length;
-      const sa = Number(data['sample_area']) || 0;
-      const ma = Number(data['mu_area']) || 0;
-      const mc = Number(data['mu_design_count']) || 0;
-      if (!sa || !ma || !mc) return '';
-      return ((avg * ma) / (sa * mc)).toFixed(6);
+      const avg = Math.round(sum / sVals.length);            // 平均成活株数（取整）
+      const sa = Number(data['sample_area']) || 0;           // 样地面积 m²
+      const ma = Number(data['mu_area']) || 666.67;          // 每亩面积 m²（缺省 666.67）
+      const mc = Number(data['mu_design_count']) || 0;       // 每亩设计株树
+      if (!sa || !mc) return '';
+      // 成活率(%) = 平均成活株数 × 666.67 ÷ (样地面积 × 每亩设计株树) × 100
+      return ((avg * ma) / (sa * mc) * 100).toFixed(2);
     }
     default: return '';
   }
@@ -1334,6 +1363,11 @@ async function goToSurvey(scId) {
     state.subcompartment = j.row;
     state.subcompartmentData = { prefilled: j.prefilled || {}, row: j.row };
     state.scExtras = j.extras || null;
+    // 正在记录该小班轨迹：用记录中的数组（含未落库的点）替换刚拉取的，避免显示/保存脱钩
+    if (_scWatchId !== null && _scTrackScId === scId && _scTrackRef) {
+      if (!state.scExtras) state.scExtras = { track: [], photos: [] };
+      state.scExtras.track = _scTrackRef;
+    }
     state.view = 'survey';
     if (state.project && state.currentTable) {
       await loadRecords(state.currentTable);
@@ -1692,6 +1726,28 @@ function exportData() {
   window.open(url, '_blank');
 }
 
+// 导出项目全部轨迹（GPX ZIP，按小班号有序打包）
+async function exportTracks() {
+  if (!state.project) { toast('请先选择项目'); return; }
+  toast('正在打包轨迹…', 1500);
+  try {
+    const res = await fetch(`api/projects/${state.project.id}/export_tracks`);
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || `导出失败 (${res.status})`);
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${state.project.name}_轨迹GPX.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('轨迹已导出');
+  } catch (e) {
+    toast('轨迹导出失败：' + e.message, 2500);
+  }
+}
+
 // ── GPS ──
 function getGPS() {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
@@ -1795,14 +1851,88 @@ function openHelpModal() {
 // ── 小班扩展面板（打卡/轨迹/照片）──
 async function openScPanelForRow(scId) {
   if (!scId) return;
+  // 正在记录轨迹时切换小班：先停止并保存到原小班，防止轨迹丢失/错挂
+  if (_scWatchId !== null && _scTrackScId && _scTrackScId !== scId) {
+    await stopTrackRecording();
+    toast('已自动保存并停止上一小班轨迹', 2200);
+  }
   try {
     const j = await fetchJSON(`api/subcompartments/rows/${scId}`);
     state.subcompartment = j.row;
     state.subcompartmentData = { prefilled: j.prefilled || {}, row: j.row };
     state.scExtras = j.extras || null;
+    // 正在记录该小班轨迹：用记录中的数组（含未落库的点）替换刚拉取的，避免显示/保存脱钩
+    if (_scWatchId !== null && _scTrackScId === scId && _scTrackRef) {
+      if (!state.scExtras) state.scExtras = { track: [], photos: [] };
+      state.scExtras.track = _scTrackRef;
+    }
     _renderScPanel();
   } catch (e) {
     toast('加载小班信息失败：' + e.message, 2500);
+  }
+}
+
+// 打卡成功后自动填样地坐标：按小班分类定位所属表，样地坐标x/y 为空才填（不覆盖手工值）
+async function fillSampleCoords(scId, lng, lat) {
+  if (!state.project || !scId) return;
+  try {
+    const row = (state.scAllRows || []).find(r => r.id === scId) || state.gridSubcompartment;
+    const cat = row ? (row.category || '') : '';
+    const tid = CATEGORY_TO_TABLE[cat] || state.gridTable || 'table1';
+    const def = getGridTableDef(tid);
+    if (!def) return;
+    const fields = def.input_columns || [];
+    const hasCoord = fields.some(f => f.key === 'sample_coord_x');
+    const hasDate = fields.some(f => f.key === 'inspect_time');
+    if (!hasCoord && !hasDate) return;
+    // 拉取该表全部记录，合并保存（避免覆盖其它字段）
+    const j = await fetchJSON(`api/projects/${state.project.id}/survey/${tid}/rows`);
+    const rec = (j.rows || []).find(r => r.subcompartment_id === scId);
+    const existing = Object.assign({}, (rec && rec.data) || {});
+    if (tid === state.gridTable) {
+      // 顺带全量刷新缓存，打卡状态筛选立即准确
+      const m = {};
+      (j.rows || []).forEach(r => { m[r.subcompartment_id] = r.data || {}; });
+      state._gridSurveyMap = m;
+    }
+    let changed = false;
+    let coordFilled = false;
+    // 样地坐标：为空才填（不覆盖手工精测值）
+    if (hasCoord) {
+      if (existing.sample_coord_x == null || existing.sample_coord_x === '') {
+        existing.sample_coord_x = Number(lng); changed = true; coordFilled = true;
+      }
+      if (existing.sample_coord_y == null || existing.sample_coord_y === '') {
+        existing.sample_coord_y = Number(lat); changed = true; coordFilled = true;
+      }
+    }
+    // 验收时间：为空则填打卡当天（坐标已有值也照填，不受上面坐标提前返回影响）
+    if (hasDate && (existing.inspect_time == null || existing.inspect_time === '')) {
+      const d = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      existing.inspect_time = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      changed = true;
+    }
+    if (!changed) return;
+    if (!existing.inspector) existing.inspector = state.user || '';
+    await fetch(`api/projects/${state.project.id}/survey/${tid}/rows`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subcompartment_id: scId, data: existing, inspector: state.user || '' }),
+    });
+    // 同步缓存 + 刷新网格显示（当前表匹配且正显示该小班时）
+    if (tid === state.gridTable) {
+      state._gridSurveyMap[scId] = existing;
+      (state._gridRowFields || []).forEach((f, idx) => {
+        if ((f.key === 'sample_coord_x' || f.key === 'sample_coord_y' || f.key === 'inspect_time') && state._grid) {
+          state._grid.setValueFromCoords(1, idx, String(existing[f.key]));
+        }
+      });
+      refreshGridToolbar();  // 打卡状态筛选下拉选项随坐标更新
+    }
+    toast(coordFilled ? '样地坐标、验收时间已填入' : '验收时间已填入', 1500);
+  } catch (e) {
+    // 填写失败不影响打卡本身
   }
 }
 
@@ -1821,6 +1951,7 @@ async function quickCheckin(scId) {
         body: JSON.stringify({ lng, lat }),
       });
       toast('✓ 打卡成功');
+      await fillSampleCoords(scId, lng, lat);
       const row = qs(`.sc-list-row[data-scid="${scId}"]`);
       if (row) {
         let badge = qs('.sc-checkin-badge', row);
@@ -1906,6 +2037,9 @@ function _renderScPanel() {
             <label class="btn-sc-action">拍摄/选择照片
               <input type="file" id="scPhotoFile" accept="image/*" capture="environment" hidden>
             </label>
+            ${photos.length
+              ? `<div class="sc-photo-save-path">📁 已保存到目录：${escapeHtml(state._photoSaveDir || PHOTO_SAVE_DIR)}</div>`
+              : `<div class="sc-photo-save-path empty">📁 拍摄后自动保存到：${escapeHtml(state._photoSaveDir || PHOTO_SAVE_DIR)}（文件名：分类_乡镇_村_小班_时间.jpg）</div>`}
           </div>
         </div>
       </div>
@@ -1934,6 +2068,7 @@ async function scCheckin() {
       }
       _renderScPanel();
       toast('打卡成功');
+      await fillSampleCoords(scId, lng, lat);
     } catch (e) {
       toast('打卡失败：' + e.message, 2500);
     }
@@ -1943,12 +2078,16 @@ async function scCheckin() {
 }
 
 let _scWatchId = null;
+let _scTrackScId = null;   // 正在记录轨迹的小班 id
+let _scTrackRef = null;    // 轨迹点数组引用（scExtras 被替换后仍有效）
+let _scTrackTimer = null;  // 自动保存定时器
 let _trackMap = null;     // Leaflet 地图实例
 let _trackLayer = null;   // 轨迹折线图层
 let _trackMarker = null;  // 当前位置标记
 
 function openTrackMap() {
-  if (!state.scExtras || !state.scExtras.track || !state.scExtras.track.length) {
+  const noTrack = !state.scExtras || !state.scExtras.track || !state.scExtras.track.length;
+  if (noTrack && !state._scTracking) {
     toast('无轨迹点');
     return;
   }
@@ -2038,11 +2177,13 @@ function closeTrackMap() {
 async function scTrackToggle() {
   if (!state.subcompartment) return;
   const scId = state.subcompartment.id;
+  // 别的小班轨迹仍在记录：先自动停止并保存（单设备 GPS 同时只能记一条）
+  if (_scWatchId !== null && _scTrackScId && _scTrackScId !== scId) {
+    await stopTrackRecording();
+    toast('已自动保存并停止上一小班轨迹', 2200);
+  }
   if (_scWatchId !== null) {
-    navigator.geolocation.clearWatch(_scWatchId);
-    _scWatchId = null;
-    state._scTracking = false;
-    await _scSaveTrack();
+    await stopTrackRecording();
     _renderScPanel();
     _updateTrackMapState();
     return;
@@ -2051,24 +2192,88 @@ async function scTrackToggle() {
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
   if (!state.scExtras.track) state.scExtras.track = [];
   state._scTracking = true;
-  toast('开始记录轨迹，请保持页面打开…', 2500);
+  toast('开始记录轨迹（每15秒自动保存）…', 2500);
+  _scTrackScId = scId;                       // 记录轨迹归属的小班（防切换后丢失）
+  _scTrackRef = state.scExtras.track;        // 引用住数组，即使 scExtras 被替换
+  let savedLen = 0;
+  _scTrackTimer = setInterval(async () => {
+    // 定时静默自动保存：中途杀 APP/刷新/断网也能保住已记录点
+    if (!_scTrackRef || _scTrackRef.length === savedLen) return;
+    const ok = await _postTrack(_scTrackScId, _scTrackRef, true);
+    if (ok) savedLen = _scTrackRef.length;
+  }, 15000);
   _scWatchId = navigator.geolocation.watchPosition(pos => {
     const pt = {
       lng: pos.coords.longitude.toFixed(6),
       lat: pos.coords.latitude.toFixed(6),
       t: new Date().toISOString(),
     };
-    state.scExtras.track.push(pt);
+    _scTrackRef.push(pt);
+    // 同步挂钩：scExtras 可能被重新拉取替换，确保 UI/轨迹图实时显示记录中的点
+    if (state.scExtras) state.scExtras.track = _scTrackRef;
   }, err => {
     handleGeoError(err);
     navigator.geolocation.clearWatch(_scWatchId);
     _scWatchId = null;
     state._scTracking = false;
+    if (_scTrackTimer) { clearInterval(_scTrackTimer); _scTrackTimer = null; }
+    // 已记录的点仍保存，避免整段丢失
+    if (_scTrackScId && _scTrackRef && _scTrackRef.length) _postTrack(_scTrackScId, _scTrackRef, false);
+    _scTrackScId = null;
+    _scTrackRef = null;
     _renderScPanel();
     _updateTrackMapState();
   }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
+  // 先立即取一个点：GPS 冷启动时 watch 回调可能数十秒不来，避免"记录中却 0 点"
+  navigator.geolocation.getCurrentPosition(pos => {
+    if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
+    if (!_scTrackRef.length) {
+      _scTrackRef.push({
+        lng: pos.coords.longitude.toFixed(6),
+        lat: pos.coords.latitude.toFixed(6),
+        t: new Date().toISOString(),
+      });
+      if (state.scExtras) state.scExtras.track = _scTrackRef;
+      _updateTrackMapState();
+    }
+  }, () => {}, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
   _renderScPanel();
   _updateTrackMapState();
+}
+
+// 停止记录并保存（点「停止」或切换小班/退后台时调用）
+async function stopTrackRecording() {
+  if (_scWatchId !== null) {
+    navigator.geolocation.clearWatch(_scWatchId);
+    _scWatchId = null;
+  }
+  if (_scTrackTimer) { clearInterval(_scTrackTimer); _scTrackTimer = null; }
+  state._scTracking = false;
+  if (_scTrackScId && _scTrackRef) {
+    if (_scTrackRef.length) {
+      await _postTrack(_scTrackScId, _scTrackRef, false);
+    } else {
+      toast('未记录到轨迹点（GPS 信号弱或未移动），原轨迹已保留', 2600);
+    }
+  }
+  _scTrackScId = null;
+  _scTrackRef = null;
+}
+
+// 提交轨迹到指定小班（quiet=true 静默自动保存，不弹提示）
+async function _postTrack(scId, points, quiet) {
+  try {
+    await fetchJSON(`api/subcompartments/rows/${scId}/track`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ points }),
+    });
+    if (!quiet) toast(`轨迹已保存（${points.length} 点）`);
+    return true;
+  } catch (e) {
+    if (!quiet) toast('轨迹保存失败：' + e.message, 2500);
+    return false;
+  }
 }
 
 function _updateTrackMapState() {
@@ -2142,6 +2347,9 @@ async function scTrackFileUpload(input) {
 }
 
 // 照片名前缀：分类_乡镇_村_小班_拍照时间
+// 照片保存目录（默认值；App 内原生保存成功后以返回的真实路径为准）
+const PHOTO_SAVE_DIR = '/storage/emulated/0/Pictures/验收照片/';
+
 function buildPhotoName(sc, origName) {
   const clean = (v) => (v == null ? '' : String(v).trim()).replace(/[\\/:*?"<>|\s]+/g, '_');
   const parts = [
@@ -2160,8 +2368,33 @@ function buildPhotoName(sc, origName) {
   return name + ext;
 }
 
-// 将拍照文件以「分类_乡镇_村_小班_时间」前缀名下载保存到安卓相册
-function savePhotoToAlbum(file, name) {
+// 将拍照文件以「分类_乡镇_村_小班_时间」前缀名保存到安卓相册。
+// App 内优先走原生 MediaStore（Pictures/验收照片，返回真实路径）；浏览器回退 <a download>。
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+async function savePhotoToAlbum(file, name) {
+  if (isApp()) {
+    const plugin = permPlugin();
+    if (plugin && plugin.savePhoto) {
+      try {
+        const base64 = await fileToBase64(file);
+        const r = await plugin.savePhoto({ base64, name });
+        const p = r && r.path;
+        if (p) {
+          const dir = p.slice(0, p.lastIndexOf('/') + 1);
+          if (dir) state._photoSaveDir = dir;
+          return;
+        }
+      } catch (e) { /* 原生失败回退下载 */ }
+    }
+  }
   try {
     const url = URL.createObjectURL(file);
     const a = document.createElement('a');
@@ -2190,7 +2423,7 @@ async function scPhotoFileChange(input) {
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
   if (!state.scExtras.photos) state.scExtras.photos = [];
   const name = buildPhotoName(state.subcompartment, file.name);
-  savePhotoToAlbum(file, name);
+  await savePhotoToAlbum(file, name);
   state.scExtras.photos.push({
     name,
     lng, lat,
@@ -2198,6 +2431,7 @@ async function scPhotoFileChange(input) {
     url: '',
   });
   await _scSavePhotos();
+  toast('已保存到 ' + (state._photoSaveDir || PHOTO_SAVE_DIR), 2600);
   _renderScPanel();
 }
 
@@ -2220,10 +2454,10 @@ async function gridScPhotoChange(input) {
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
   if (!state.scExtras.photos) state.scExtras.photos = [];
   const name = buildPhotoName(sc, file.name);
-  savePhotoToAlbum(file, name);
+  await savePhotoToAlbum(file, name);
   state.scExtras.photos.push({ name, lng, lat, t: new Date().toISOString(), url: '' });
   await _scSavePhotos();
-  toast('照片已保存：' + name);
+  toast('已保存到 ' + (state._photoSaveDir || PHOTO_SAVE_DIR), 2600);
   input.remove();
 }
 
@@ -2325,6 +2559,9 @@ app.addEventListener('click', async (e) => {
       break;
     case 'export':
       exportData();
+      break;
+    case 'export-tracks':
+      await exportTracks();
       break;
     case 'open-help':
       openHelpModal();
@@ -2535,8 +2772,15 @@ app.addEventListener('change', async (e) => {
     return;
   }
   if (t.id === 'gridSubcompartmentFilter') {
+    // value 为小班行主键 id（同号小班不唯一，必须按 id 定位）
     const scId = t.value;
-    state.gridSubcompartment = (state.gridScRows || []).find(r => r.id === scId) || null;
+    const nextSc = scId ? ((state.gridScRows || []).find(r => r.id === scId) || null) : null;
+    // 正在记录轨迹时切换小班：先停止并保存到原小班
+    if (_scWatchId !== null && _scTrackScId && nextSc && _scTrackScId !== nextSc.id) {
+      await stopTrackRecording();
+      toast('已自动保存并停止上一小班轨迹', 2200);
+    }
+    state.gridSubcompartment = nextSc;
     state.subcompartment = state.gridSubcompartment;  // 复用照片/打卡等扩展数据流程
     await loadGridSubcompartmentData();
     // 预载扩展数据（照片/轨迹/打卡），避免拍照保存时覆盖历史记录
@@ -2548,6 +2792,13 @@ app.addEventListener('change', async (e) => {
     } else {
       state.scExtras = null;
     }
+    refreshGridToolbar();
+    await renderSurveyForm();
+    return;
+  }
+  if (t.id === 'gridCheckinFilter') {
+    state.gridCheckin = t.value;
+    state.gridSubcompartment = null;    // 级联：清空已选小班
     refreshGridToolbar();
     await renderSurveyForm();
     return;
@@ -2579,4 +2830,21 @@ app.addEventListener('keydown', (e) => {
 });
 
 // 启动
+// 退后台/关闭页面前兜底保存轨迹（Android WebView 切后台即可能被回收）
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && _scWatchId !== null) {
+    // 静默保存，不停止记录（回前台继续）
+    if (_scTrackScId && _scTrackRef && _scTrackRef.length) _postTrack(_scTrackScId, _scTrackRef, true);
+  }
+});
+window.addEventListener('pagehide', () => {
+  if (_scWatchId !== null && _scTrackScId && _scTrackRef && _scTrackRef.length) {
+    // pagehide 中 async fetch 可能被截断，用同步 sendBeacon 兜底
+    try {
+      const blob = new Blob([JSON.stringify({ points: _scTrackRef })], { type: 'application/json' });
+      navigator.sendBeacon(`api/subcompartments/rows/${_scTrackScId}/track`, blob);
+    } catch (e) { /* 忽略 */ }
+  }
+});
+
 init();
