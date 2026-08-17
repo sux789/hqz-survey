@@ -196,6 +196,13 @@ function computeGroups(fields) {
 
 // ── 初始化 ──
 async function init() {
+  // 仅允许在宏芊紫验收APP（Capacitor 原生壳）内运行，浏览器打开直接拦截
+  if (!isApp()) {
+    renderBrowserBlock();
+    return;
+  }
+  // 启动即预先申请默认权限（定位/相机），被拒时提示；具体功能使用前还会再次校验
+  checkAppPermissions();
   renderShell();
   try {
     const me = await fetchJSON('api/me');
@@ -224,7 +231,6 @@ async function init() {
   }
   state.view = 'survey_grid';
   renderApp();
-  checkAppPermissions();
 }
 
 // App 内启动时主动检查定位/相机权限，缺失则先申请；被拒后提示用户
@@ -291,6 +297,8 @@ function applyUserDefault() {
 
 // ── 主渲染 ──
 function renderShell() {
+  const bs = qs('#boot-splash');
+  if (bs) bs.remove();
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar" id="topbar"></header>
@@ -298,6 +306,21 @@ function renderShell() {
     </div>
     <div id="modalRoot"></div>
   `;
+}
+
+// 浏览器拦截：本系统仅限宏芊紫验收APP内使用
+const APP_DOWNLOAD_URL = 'https://github.com/sux789/hqz-survey/releases/download/latest/app-debug.apk';
+function renderBrowserBlock() {
+  const bs = qs('#boot-splash');
+  if (bs) bs.remove();
+  document.title = '宏芊紫验收APP';
+  app.innerHTML = `
+    <div style="min-height:100vh;background:#2e7d32;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:32px;text-align:center;font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;">
+      <div style="font-size:56px;">📱</div>
+      <div style="color:#fff;font-size:24px;font-weight:700;letter-spacing:2px;">宏芊紫验收APP</div>
+      <div style="color:rgba(255,255,255,.92);font-size:15px;line-height:1.7;">本系统不支持在浏览器中运行<br>请下载并使用宏芊紫验收APP</div>
+      <a href="${APP_DOWNLOAD_URL}" style="margin-top:8px;background:#fff;color:#2e7d32;text-decoration:none;font-weight:700;font-size:16px;padding:12px 32px;border-radius:24px;">下载 APP（Android）</a>
+    </div>`;
 }
 
 function renderApp() {
@@ -948,7 +971,9 @@ async function renderSurveyForm() {
     rowFields.push({ kind: 'input', key: f.key, label: f.label, type: f.type, options: f.options || [], readOnly: !!f.readOnly });
     let v = sv[f.key];
     if (v == null) v = '';
-    if (f.type === 'checkbox') v = (v === true || v === 'true' || v === 1 || v === '1' || v === '有') ? 'TRUE' : 'FALSE';
+    // 只读字段空值时回填小班预填值（每亩面积/每亩设计株树 等）
+    if (f.readOnly && v === '' && pf[f.key] != null) v = String(pf[f.key]);
+    if (f.type === 'checkbox') v = (v === true || v === 'true' || v === 1 || v === '1' || v === '有') ? '是' : '否';
     data.push([f.label, String(v)]);
   });
   state._gridRowFields = rowFields;
@@ -1019,6 +1044,20 @@ async function renderSurveyForm() {
         select.addEventListener('change', () => {
           const val = select.value;
           state._grid.setValueFromCoords(1, i, val);
+        });
+        td.innerHTML = '';
+        td.appendChild(select);
+      }
+      // checkbox 字段注入 是/否 下拉框
+      if (f.kind === 'input' && f.type === 'checkbox' && !f.readOnly) {
+        const curVal = data[i][1] === '是' ? '是' : '否';
+        const select = document.createElement('select');
+        select.className = 'cell-enum-select';
+        select.style.cssText = 'width:100%;height:100%;border:none;background:transparent;font-size:13px;cursor:pointer;';
+        select.innerHTML = `<option value="是" ${curVal === '是' ? 'selected' : ''}>是</option>`
+          + `<option value="否" ${curVal === '否' ? 'selected' : ''}>否</option>`;
+        select.addEventListener('change', () => {
+          state._grid.setValueFromCoords(1, i, select.value);
         });
         td.innerHTML = '';
         td.appendChild(select);
@@ -1187,7 +1226,7 @@ async function onGridCellChange(x, y, value) {
   if (!f || f.kind !== 'input' || f.readOnly) return; // 预填/computed/readOnly 行忽略
   const existing = Object.assign({}, state._gridSurveyMap[sc.id] || {});
   let v = value;
-  if (f.type === 'checkbox') v = (value === true || value === 'true' || value === 1 || value === '1' || value === 'TRUE' || value === '有');
+  if (f.type === 'checkbox') v = (value === true || value === 'true' || value === 1 || value === '1' || value === '是' || value === '有');
   if (f.type === 'percent') v = value === '' ? '' : Number(value);
   if (f.type === 'number') v = value === '' ? '' : Number(value);
   existing[f.key] = v;
@@ -1843,6 +1882,7 @@ function _renderScPanel() {
             ${trackHtml}
             <div class="sc-extras-actions">
               <button class="btn-sc-action ${tracking ? 'danger' : ''}" data-action="sc-track-toggle">${trackBtnLabel}</button>
+              ${track.length ? '<button class="btn-sc-action" data-action="sc-track-view">查看轨迹图</button>' : ''}
               ${track.length ? '<button class="btn-sc-action warn" data-action="sc-track-clear">清空</button>' : ''}
             </div>
             <label class="btn-sc-action ghost">上传 GPX 文件
@@ -1892,6 +1932,98 @@ async function scCheckin() {
 }
 
 let _scWatchId = null;
+let _trackMap = null;     // Leaflet 地图实例
+let _trackLayer = null;   // 轨迹折线图层
+let _trackMarker = null;  // 当前位置标记
+
+function openTrackMap() {
+  if (!state.scExtras || !state.scExtras.track || !state.scExtras.track.length) {
+    toast('无轨迹点');
+    return;
+  }
+  let modal = qs('#trackMapModal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'trackMapModal';
+  modal.className = 'track-map-modal';
+  const tracking = !!state._scTracking;
+  const track = state.scExtras.track || [];
+  modal.innerHTML = `
+    <div class="track-map-box">
+      <div class="track-map-header">
+        <span class="track-map-title">轨迹图（${track.length} 点）</span>
+        <button class="track-map-close" data-action="track-map-close">×</button>
+      </div>
+      <div id="trackMapContainer" class="track-map-container"></div>
+      <div class="track-map-actions">
+        <span class="track-map-status">${tracking ? '正在记录…' : '已停止'}</span>
+        <button class="btn-grid-action ${tracking ? 'danger' : ''}" data-action="sc-track-toggle">${tracking ? '停止记录' : '开始记录'}</button>
+        <button class="btn-grid-action" data-action="track-map-close">关闭</button>
+      </div>
+    </div>
+  `;
+  app.appendChild(modal);
+  modal.style.display = 'flex';
+
+  // 初始化 Leaflet 地图
+  const container = qs('#trackMapContainer');
+  _trackMap = L.map(container, { zoomControl: true, attributionControl: false }).setView([0, 0], 13);
+  // 高德瓦片（国内访问快，无偏移问题用 WGS84 经纬度，会有轻微偏移但可接受）
+  L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
+    subdomains: ['1', '2', '3', '4'],
+    maxZoom: 18,
+  }).addTo(_trackMap);
+
+  _drawTrackLine();
+
+  // 定时刷新轨迹（记录中实时更新）
+  modal._refreshTimer = setInterval(() => {
+    if (state._scTracking && state.scExtras && state.scExtras.track) {
+      _drawTrackLine();
+      const status = modal.querySelector('.track-map-status');
+      if (status) status.textContent = `正在记录…（${state.scExtras.track.length} 点）`;
+      const title = modal.querySelector('.track-map-title');
+      if (title) title.textContent = `轨迹图（${state.scExtras.track.length} 点）`;
+    }
+  }, 3000);
+}
+
+function _drawTrackLine() {
+  if (!_trackMap || !state.scExtras || !state.scExtras.track) return;
+  const track = state.scExtras.track;
+  const latlngs = track.filter(p => p.lat && p.lng).map(p => [parseFloat(p.lat), parseFloat(p.lng)]);
+  if (!latlngs.length) return;
+
+  if (_trackLayer) {
+    _trackMap.removeLayer(_trackLayer);
+  }
+  _trackLayer = L.polyline(latlngs, { color: '#2e7d32', weight: 4, opacity: 0.8 }).addTo(_trackMap);
+
+  // 起点绿点，终点红点
+  if (_trackMarker) _trackMap.removeLayer(_trackMarker);
+  L.circleMarker(latlngs[0], { radius: 6, color: '#2e7d32', fillColor: '#2e7d32', fillOpacity: 1 }).addTo(_trackMap);
+  if (latlngs.length > 1) {
+    L.circleMarker(latlngs[latlngs.length - 1], { radius: 6, color: '#c62828', fillColor: '#c62828', fillOpacity: 1 }).addTo(_trackMap);
+  }
+
+  // 自动适配视野
+  _trackMap.fitBounds(_trackLayer.getBounds(), { padding: [30, 30] });
+}
+
+function closeTrackMap() {
+  const modal = qs('#trackMapModal');
+  if (!modal) return;
+  if (modal._refreshTimer) clearInterval(modal._refreshTimer);
+  if (_trackMap) {
+    _trackMap.remove();
+    _trackMap = null;
+    _trackLayer = null;
+    _trackMarker = null;
+  }
+  modal.remove();
+  // 关闭弹窗不影响后台轨迹记录（_scWatchId 保持）
+}
+
 async function scTrackToggle() {
   if (!state.subcompartment) return;
   const scId = state.subcompartment.id;
@@ -1901,6 +2033,7 @@ async function scTrackToggle() {
     state._scTracking = false;
     await _scSaveTrack();
     _renderScPanel();
+    _updateTrackMapState();
     return;
   }
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
@@ -1921,8 +2054,30 @@ async function scTrackToggle() {
     _scWatchId = null;
     state._scTracking = false;
     _renderScPanel();
+    _updateTrackMapState();
   }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
   _renderScPanel();
+  _updateTrackMapState();
+}
+
+function _updateTrackMapState() {
+  // 同步更新轨迹地图弹窗的按钮和状态（如果弹窗开着）
+  const modal = qs('#trackMapModal');
+  if (!modal) return;
+  const tracking = !!state._scTracking;
+  const track = (state.scExtras && state.scExtras.track) || [];
+  const btn = modal.querySelector('[data-action="sc-track-toggle"]');
+  if (btn) {
+    btn.textContent = tracking ? '停止记录' : '开始记录';
+    btn.classList.toggle('danger', tracking);
+  }
+  const status = modal.querySelector('.track-map-status');
+  if (status) status.textContent = tracking ? `正在记录…（${track.length} 点）` : '已停止';
+}
+
+// 从轨迹面板点"查看轨迹图"
+function scTrackView() {
+  openTrackMap();
 }
 
 async function _scSaveTrack() {
@@ -2263,8 +2418,14 @@ app.addEventListener('click', async (e) => {
     case 'sc-track-toggle':
       await scTrackToggle();
       break;
+    case 'sc-track-view':
+      scTrackView();
+      break;
     case 'sc-track-clear':
       scTrackClear();
+      break;
+    case 'track-map-close':
+      closeTrackMap();
       break;
     case 'sc-photo-remove':
       scPhotoRemove(Number(t.dataset.idx));

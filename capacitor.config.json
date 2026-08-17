@@ -1,7 +1,8 @@
 {
   "appId": "top.bibook.survey",
-  "appName": "林业调查",
+  "appName": "宏芊紫验收APP",
   "webDir": "www",
+  "backgroundColor": "#2e7d32",
   "server": {
     "url": "https://forest.bibook.top/survey",
     "cleartext": false
