@@ -155,12 +155,14 @@ class TestExportBase:
         assert ws.cell(row=6, column=46).value == "测试备注"
 
     def test_unsurveyed_row_leaves_input_blank(self, sample_data):
-        """未录入小班（sc2 行5）白色列留空。"""
+        """未录入小班（sc2 行5）：纯数据列留空，模板公式列代入公式。"""
         output, _ = exporter.export_base(sample_data["pid"])
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        assert ws.cell(row=5, column=15).value in (None, "")
+        # AN（查数株数）无模板公式 → 留空
         assert ws.cell(row=5, column=40).value in (None, "")
+        # O 列模板公式（成活率分派）代入数据行（行5 偏移 0）
+        assert ws.cell(row=5, column=15).value == '=IF(AP5>=0.9,AP5,"")'
 
     def test_category_filter(self, sample_data):
         """按分类导出：仅保留当前分类 sheet，其余分类 sheet 移除。"""
@@ -291,19 +293,19 @@ class TestExportSamples:
         assert stats["project"] == "测试项目"
 
     def test_block_structure(self, sample_data):
-        """每小班一个 39 行块：sc2 块1（行1-39），sc1 块2（行40-78）。"""
+        """每小班一个 38 行块：sc2 块1（行1-38），sc1 块2（行39-76）。"""
         output, _ = exporter.export_samples(sample_data["pid"])
         wb = openpyxl.load_workbook(output)
         assert "人工造林" in wb.sheetnames
         ws = wb["人工造林"]
-        # 块2 起始行 40 的标题 + 块内样地数据（行 44-45，数据起始 40+4）
-        assert "样地调查表" in str(ws.cell(row=40, column=1).value)
-        # sc1 样地1：行 40+4=44，A=样圆号1，C=种植100，D=成活90
-        assert ws.cell(row=44, column=1).value == 1
-        assert ws.cell(row=44, column=3).value == 100
-        assert ws.cell(row=44, column=4).value == 90
+        # 块2 起始行 39 的标题 + 块内样地数据（行 42-43，数据起始 39+3）
+        assert "样地调查表" in str(ws.cell(row=39, column=1).value)
+        # sc1 样地1：行 39+3=42，A=样地号1，C=种植100，D=成活90
+        assert ws.cell(row=42, column=1).value == 1
+        assert ws.cell(row=42, column=3).value == 100
+        assert ws.cell(row=42, column=4).value == 90
         # 死亡株数公式（E 列）
-        assert ws.cell(row=44, column=5).value == "=C44-D44"
+        assert ws.cell(row=42, column=5).value == "=C42-D42"
 
     def test_empty_category_skipped(self, sample_data):
         """无数据的分类跳过（不建 sheet，不崩）。"""
@@ -320,26 +322,29 @@ class TestExportSamples:
         wb = openpyxl.load_workbook(output)
         assert wb.sheetnames == ["人工造林-5"]
         ws = wb["人工造林-5"]
-        # 只有块1：sc1 样地1 在行 5（块1数据起始），行 44（块2）应为空
-        assert ws.cell(row=5, column=1).value == 1
-        assert ws.cell(row=5, column=3).value == 100
-        assert ws.cell(row=5, column=4).value == 90
-        assert ws.cell(row=44, column=1).value is None
+        # 只有块1：sc1 样地1 在行 4（块1数据起始），行 39（块2标题位）应为空
+        assert ws.cell(row=4, column=1).value == 1
+        assert ws.cell(row=4, column=3).value == 100
+        assert ws.cell(row=4, column=4).value == 90
+        assert ws.cell(row=39, column=1).value is None
         assert stats["sheets"] == {"人工造林-5": 1}
 
-    def test_a2_and_coord_precision(self, sample_data):
-        """A2 含小班和调查小班号；坐标写全精度浮点（不被 _fmt_num 舍入到 2 位）。"""
+    def test_title_and_coord_precision(self, sample_data):
+        """R1 标题含项目类型+调查小班号；R2 年度县乡；坐标写全精度浮点。"""
         output, _ = exporter.export_samples(
             sample_data["pid"], subcompartment_id=sample_data["sc1"])
         wb = openpyxl.load_workbook(output)
         ws = wb["人工造林-5"]
-        a2 = str(ws.cell(row=2, column=1).value)
-        assert "项目类型：人工造林" in a2
-        assert "小班：5" in a2          # GDB 小班（原始号，导入归一后同调查小班号）
-        assert "调查小班号：5" in a2
-        # 坐标全精度：x=102.123456 不能被舍成 102.12
-        assert ws.cell(row=5, column=6).value == 102.123456
-        assert ws.cell(row=5, column=7).value == 25.654321
+        # R1 标题：项目名称+样地调查表（类型）+ 调查小班号
+        r1 = str(ws.cell(row=1, column=1).value)
+        assert "样地调查表（人工造林）" in r1
+        assert "调查小班号5" in r1
+        # R2 年度县乡（A2:E2 合并区）
+        r2 = str(ws.cell(row=2, column=1).value)
+        assert "年度" in r2
+        # 坐标全精度：x=102.123456 不能被舍成 102.12（数据起始 R4）
+        assert ws.cell(row=4, column=6).value == 102.123456
+        assert ws.cell(row=4, column=7).value == 25.654321
 
     def test_single_subcompartment_not_found(self, sample_data):
         """单小班模式：小班不存在或不属于该项目时 404 语义（ValueError）。"""

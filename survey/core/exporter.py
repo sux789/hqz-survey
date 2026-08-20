@@ -36,8 +36,9 @@ from survey.core import gdb as GDB
 #   2023年度封山育林 / 2023年度退化林，官方预填示例），
 #   导出前必须先清空数据区（见 _clear_*），deploy.sh 会同步 tpl/。
 # 样地模板：tpl-samples.xlsx 清理版（块结构已清示例），
-#   布局：R1 标题 / R2 项目类型行 / R3 年度县乡 / R4 列头 / R5-27 数据槽，
-#   39 行一块 —— 与 tpl/official/ 官方原版（38 行块、数据 R4 起）不同，勿混用。
+#   布局（2026-08-21 起去掉项目类型行，38 行一块）：
+#   R1 标题（含调查小班号）/ R2 年度县乡+坐标+照片 / R3 列头 /
+#   R4-26 数据槽（23 个）/ R27-38 汇总区（B27-B34 公式行号随布局）。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _TPL_DIR = _PROJECT_ROOT / "tpl"
 _BASE_TEMPLATE = _TPL_DIR / "tpl-base.xlsx"
@@ -272,10 +273,10 @@ _TPL_SHEET_NAMES = {
 # 基本信息模板数据起始行（1-2 标题，3-4 表头）
 _BASE_DATA_START = 5
 
-# 样地模板块结构（tpl-samples.xlsx，块高 39 行）
-_SAMPLE_BLOCK_ROWS = 39
-_SAMPLE_DATA_START = 5    # 块内数据起始行（样圆号 1）
-_SAMPLE_DATA_SLOTS = 23   # 模板预留样地槽位数（行5-27）
+# 样地模板块结构（tpl-samples.xlsx，块高 38 行）
+_SAMPLE_BLOCK_ROWS = 38
+_SAMPLE_DATA_START = 4    # 块内数据起始行（样地号 1）
+_SAMPLE_DATA_SLOTS = 23   # 模板预留样地槽位数（行4-26）
 
 # 公式内单元格引用（$A$1 / A1 形式），块复制时行号偏移用
 _CELL_RE = re.compile(r'(\$?[A-Z]{1,2}\$?)(\d+)')
@@ -525,6 +526,14 @@ def export_base(pid, output_path=None, category=None):
         if not table_def:
             continue
         ws = wb[sheet_name]
+        # 快照模板示例行（R5）的公式：清空数据区会连公式一起清掉。
+        # 模板 2026-08-21 起自带成活率/合格率分派公式（O/P/Q/S… 列），
+        # 写行时按行偏移代入每个数据行；exporter 有值的列仍以录入值优先。
+        tpl_formulas = {}
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(row=_BASE_DATA_START, column=c).value
+            if isinstance(v, str) and v.startswith("="):
+                tpl_formulas[c] = v
         _clear_base_data_region(ws)  # 去官方模板预填示例
         sc_rows = storage.list_project_subcompartment_rows(pid, category=cat)
         sc_rows.sort(key=_sc_sort_key)
@@ -552,6 +561,12 @@ def export_base(pid, output_path=None, category=None):
                     continue
                 if val not in ('', None):
                     ws.cell(row=row_num, column=_col_number(col_letter), value=val)
+            # 模板公式代入下一行：该行该列没写值的，填行偏移后的模板公式
+            # （如 R6 的 O 列 = IF(AP6>=0.9,AP6,"")，由 _shift_formula 平移行号）
+            for c, f in tpl_formulas.items():
+                if ws.cell(row=row_num, column=c).value in (None, ""):
+                    ws.cell(row=row_num, column=c).value = _shift_formula(
+                        f, row_num - _BASE_DATA_START)
         stats["sheets"][cat] = len(sc_rows)
 
     if output_path is None:
@@ -568,7 +583,7 @@ def export_base(pid, output_path=None, category=None):
 # ════════════════════════════════════════════
 
 def _copy_sample_block(ws, offset):
-    """把模板块1（行1-39）复制到 offset+1 起的位置。
+    """把模板块1（行1-38）复制到 offset+1 起的位置。
 
     复制值（公式行号偏移）、单元格样式、行高、块内合并单元格。
     """
@@ -596,13 +611,13 @@ def _copy_sample_block(ws, offset):
 
 
 def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
-    """填充一个小班的样地块（行 block_idx*39+1 起）。"""
+    """填充一个小班的样地块（行 block_idx*38+1 起）。"""
     base = block_idx * _SAMPLE_BLOCK_ROWS
     if block_idx > 0:
         _copy_sample_block(ws, base)
     prefilled = S.map_subcompartment_to_prefilled(sc_row.get("data", {}))
 
-    # R1 标题：项目名称+类型；R2 项目类型+小班+调查小班号；R3 年度 县区 乡镇
+    # R1 标题（项目名称+类型+调查小班号）；R2 年度县乡；R3 列头（不动）
     data = sc_row.get("data", {}) or {}
 
     def _int_like(v):
@@ -617,9 +632,13 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
     orig_no = _int_like(data.get("小班原始") or data.get("小班")
                         or sc_row.get("subcompartment"))
     survey_no = _int_like(sc_row.get("subcompartment"))
-    ws.cell(row=base + 1, column=1, value=f"{project_name}样地调查表（{cat}）")
-    ws.cell(row=base + 2, column=1,
-            value=f"项目类型：{cat}  小班：{orig_no}  调查小班号：{survey_no}")
+    # 标题含调查小班号（模板占位「样地调查表（项目名称+类型）调查小班号」）；
+    # 原始号≠调查号时括注保留小班原始号信息（D9 口径）
+    title = f"{project_name}样地调查表（{cat}）调查小班号{survey_no}"
+    if orig_no != survey_no:
+        title += f"（小班{orig_no}）"
+    ws.cell(row=base + 1, column=1, value=title)
+    # R2 年度 县区（模板 A2:E2 合并；F2 坐标 / H2 照片 为分组表头不动）
     year = _int_like(prefilled.get("plan_year") or prefilled.get("work_year"))
     parts = []
     if year:
@@ -629,9 +648,9 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
         if v not in ("", None):
             parts.append(str(v))
     if parts:
-        ws.cell(row=base + 3, column=1, value="  ".join(parts))
+        ws.cell(row=base + 2, column=1, value="  ".join(parts))
 
-    # 样地数据槽（行5-27，最多23个）：先清残留的 E 列公式（块1模板自带 R5-R8），
+    # 样地数据槽（行4-26，最多23个）：先清残留的 E 列公式（块1模板自带 R4-R7），
     # 避免无数据槽位在 Excel 中显示 0
     # （注意：ws.cell(..., value=None) 不会清值，必须属性赋值）
     for j in range(_SAMPLE_DATA_SLOTS):
@@ -663,30 +682,30 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
             if names:
                 ws.cell(row=r, column=8, value=";".join(names))
 
-    # 总样地个数（B28 起）等「手写」行留空；聚合公式（B29-B32/B35）由块复制保留
+    # 总样地个数（B27 起）等「手写」行留空；聚合公式（B28-B31/B34）由块复制保留
 
 
 def _clear_sample_template_block(ws):
     """清空样地模板块1的预填示例，保留标题/表头/汇总公式。
 
-    样地模板 tpl-samples.xlsx 块1 预填了示例样地（R5-R8 的 150/22/21 等）、
-    总样地个数(R28 B=5)、单个网格面积(R33 B=5000)、种植网格数量(R34 B=4)。
+    样地模板 tpl-samples.xlsx 块1预填了示例样地（R4-R7 的 150/22/21 等）、
+    总样地个数(R27 B=5)、单个网格面积(R32 B=5000)、种植网格数量(R33 B=4)。
     不清空会残留在导出文件里。块1清空后，copy_worksheet 得到的每个块都是干净脚手架。
-    汇总公式（R29-R35：=SUM/B30/B35 等）保留不动。
+    汇总公式（R28-R31：=SUM/=B30/B29 等、R34=ROUND）保留不动。
     """
-    # 先拆掉样地数据区（行5-27）内的合并单元格：数据行 A-H 每格独立，
+    # 先拆掉样地数据区（行4-26）内的合并单元格：数据行 A-H 每格独立，
     # 模板被手动编辑后可能残留合并（如 B27:H27），不拆会导致写值报
     # 'MergedCell' object attribute 'value' is read-only
     for m in list(ws.merged_cells.ranges):
         if m.min_row >= _SAMPLE_DATA_START and m.max_row < _SAMPLE_DATA_START + _SAMPLE_DATA_SLOTS:
             ws.unmerge_cells(start_row=m.min_row, start_column=m.min_col,
                              end_row=m.max_row, end_column=m.max_col)
-    # 样地槽（行5-27）整行 A-H 清空
+    # 样地槽（行4-26）整行 A-H 清空
     for r in range(_SAMPLE_DATA_START, _SAMPLE_DATA_START + _SAMPLE_DATA_SLOTS):
         for c in range(1, 9):  # A-H
             ws.cell(row=r, column=c).value = None
-    # 手写项：总样地个数(R28 B)/单个网格面积(R33 B)/种植网格数量(R34 B)
-    for r in (28, 33, 34):
+    # 手写项：总样地个数(R27 B)/单个网格面积(R32 B)/种植网格数量(R33 B)
+    for r in (27, 32, 33):
         ws.cell(row=r, column=2).value = None
 
 
@@ -697,7 +716,7 @@ def _sheet_safe(name):
 
 
 def export_samples(pid, output_path=None, subcompartment_id=None):
-    """导出项目样地 xlsx（tpl-samples 模板，每分类一个 sheet，每小班一个 39 行块）。
+    """导出项目样地 xlsx（tpl-samples 模板，每分类一个 sheet，每小班一个 38 行块）。
 
     Args:
         pid: 项目 ID
