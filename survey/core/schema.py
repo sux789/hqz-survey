@@ -19,13 +19,14 @@
   photo         拍照上传
   checkin       打卡（一键记录时间+GPS）
   track         轨迹（开始记录 / 上传 GPX）
-  sample_array  样方子数组（一小班多条样方，存于 data_json.samples）
+  sample_array  样地子数组（一小班多条样地，存于 data_json.samples）
   computed      公式自动计算（只读，formula 指定计算函数名，前端自动算）
 
 数据模型（小班最小粒度，一对一）:
-  每张表每个小班至多一条记录，唯一键 = (project_id, table_id, subcompartment_id)。
-  样方等"一小班多值"数据作为该记录 data_json 内的数组字段（type=sample_array），
-  不再独立成表/子表。详见 docs/设计-小班一对一数据模型.md。
+  三张验收表（人工造林/封山育林/退化林修复），每张表每个小班至多一条记录，
+  唯一键 = (project_id, table_id, subcompartment_id)。
+  样地等"一小班多值"数据作为该记录 data_json 内的数组字段（type=sample_array），
+  不再独立成表/子表。水利水保/草原分类已下线（表4/表5 删除）。
 """
 from collections import OrderedDict
 
@@ -39,32 +40,42 @@ from collections import OrderedDict
 SUBCOMPARTMENT_FIELD_MAP = {
     "州":         "city",                # 表1-4 州(市)（xlsx 必含，标准化后为「州」）
     "州（市）":   "city",                # GDB 全角括号列名
+    "市":         "city",                # GDB 直名（2022-2024 年度矢量图层字段）
     "乡镇":       "township",            # 表1-5 乡/乡镇
     "乡":         "township",            # GDB 字段别名（与「乡镇」等价）
     "县":         "county",              # 表1-4 县
     "村":         "village",             # 表1-5 村
-    "林班":       "forest_compartment",  # 表1/3/5 林班
-    "小班":       "subcompartment",      # 表1-5 小班号
+    "林班":       "forest_compartment",  # 表1/3 林班（表2 封山育林 GDB 无此字段）
+    "小班":       "subcompartment",      # 表1-5 小班号（= 调查小班号）
+    "小班原始":   "subcompartment_orig", # GDB 原「小班」字段值（导入时保留，导出 小班 列用）
     "土地权属":   "ownership",           # 表1-3 林地所有权
     "土地权":     "ownership",           # GDB 字段别名
     "林地所有权": "ownership",           # GDB 字段别名（直名）
-    "优势树种":   "tree_species",        # 表1 造林树种
+    "造林树种":   "tree_species",        # 表1/2/3 造林树种（GDB 直名）
     "优势树":     "tree_species",        # GDB 字段别名
-    "造林树种":   "tree_species",        # GDB 字段别名（直名）
+    "优势树种":   "dominant_species",    # 表2 优势树种（GDB 直名；表2 与造林树种并存两列）
     "抚育面积":   "reported_area",       # 表1-3 上报面积
     "上报面积":   "reported_area",       # GDB 字段别名（直名）
+    "补植面积":   "replant_area",        # 表2/3 补植面积（GDB 直名）
     "验收类别":   "check_type",          # 表1 验收类别（GDB 直名）
     "计划年度":   "plan_year",           # 表1 计划年度（GDB 直名）
     "作业年度":   "work_year",           # 表1 作业年度（GDB 直名）
-    "每亩面积":   "mu_area",             # 表1 样方只读列（GDB 直名）
-    "每亩设计株树": "mu_design_count",   # 表1 样方只读列（GDB 直名）
+    "始封年度":   "start_year",          # 表2 始封年度（GDB 直名）
+    "总需苗量":   "design_count",        # GDB 别名（需苗量+补植株数，兜底）
+    "需苗量":     "design_count",        # 表1 小班设计株树（GDB 直名，导出 AQ；两者并存时需苗量优先，与模板示例一致）
+    "小班设计株树": "design_count",      # GDB 直名（2022-2024 年度矢量图层字段）
     "封育对象":   "seal_target",         # 表2 封育对象（xlsx 可选列）
     "封育年限":   "seal_years",          # 表2 封育年限
     "封育类型":   "seal_type",           # 表2 封育类型
     "封育方式":   "seal_method",         # 表2 封育方式
     "封育措施":   "seal_measure",        # 表2 封育措施
     "育林措施":   "forest_measure",      # 表2 育林措施
-    "小班面积":   "manage_area",         # 表5 小班经营面积
+    "封前地类":   "pre_land_type",       # 表2 封前地类（GDB 直名）
+    "郁闭度":     "canopy_cover",        # 表2 郁闭度（GDB 直名）
+    "修复措施":   "repair_measure",      # 表3 修复措施（GDB 直名）
+    "修复方式":   "repair_method",       # 表3 修复方式（GDB 直名）
+    "辅助措施":   "auxiliary_measure",   # 表3 辅助措施（GDB 直名）
+    "小班面积":   "manage_area",         # 小班经营面积（别名）
     "项目名称":   "project_name",        # 表1-4 项目名称（来自项目信息 sheet）
 }
 
@@ -133,6 +144,8 @@ def map_subcompartment_to_prefilled(sc_data):
     for sc_col, pf_key in SUBCOMPARTMENT_FIELD_MAP.items():
         if sc_col in sc_data:
             val = sc_data[sc_col]
+            if isinstance(val, str):
+                val = val.strip()  # GDB 值可能为纯空格串（如造林树种 "  "）
             if val is None or val == "":
                 continue
             if pf_key in _UINT_PREFILLED_KEYS:
@@ -145,14 +158,51 @@ _INSPECTOR = {"key": "inspector", "label": "验收人员", "type": "text", "grou
 _INSPECT_TIME = {"key": "inspect_time", "label": "验收时间", "type": "date", "group": "验收", "required": True, "default": "today", "col_span": "half"}
 _REMARK = {"key": "remark", "label": "备注", "type": "textarea", "group": "验收", "required": False, "default": "", "col_span": "full"}
 
-# ── 通用管理情况 6 项复选 ──
+# ── 通用管理情况 6 项（有/无 下拉，默认有；旧 checkbox 布尔数据导出时归一） ──
 _MGMT_FIELDS = [
-    {"key": "mgmt_design", "label": "作业设计", "type": "checkbox", "group": "管理情况", "default": True, "col_span": "half"},
-    {"key": "mgmt_meeting", "label": "会议纪要", "type": "checkbox", "group": "管理情况", "default": True, "col_span": "half"},
-    {"key": "mgmt_speech", "label": "讲话记录", "type": "checkbox", "group": "管理情况", "default": False, "col_span": "half"},
-    {"key": "mgmt_survey", "label": "调研报告", "type": "checkbox", "group": "管理情况", "default": False, "col_span": "half"},
-    {"key": "mgmt_supervision", "label": "监理报告", "type": "checkbox", "group": "管理情况", "default": False, "col_span": "half"},
+    {"key": "mgmt_design", "label": "作业设计", "type": "enum", "options": ["有", "无"], "default": "有", "group": "管理情况", "col_span": "half"},
+    {"key": "mgmt_meeting", "label": "会议纪要", "type": "enum", "options": ["有", "无"], "default": "有", "group": "管理情况", "col_span": "half"},
+    {"key": "mgmt_speech", "label": "讲话记录", "type": "enum", "options": ["有", "无"], "default": "有", "group": "管理情况", "col_span": "half"},
+    {"key": "mgmt_survey", "label": "调研报告", "type": "enum", "options": ["有", "无"], "default": "有", "group": "管理情况", "col_span": "half"},
+    {"key": "mgmt_supervision", "label": "监理报告", "type": "enum", "options": ["有", "无"], "default": "有", "group": "管理情况", "col_span": "half"},
     {"key": "mgmt_photo", "label": "图片", "type": "photo", "group": "管理情况", "required": False, "col_span": "half"},
+]
+
+# ── 调查完成标记（每表最后一列，默认否） ──
+_SURVEY_DONE = {"key": "survey_completed", "label": "调查已经完成", "type": "enum", "options": ["是", "否"], "default": "否", "group": "验收", "required": False, "col_span": "half"}
+
+# ── 样地调查（三表共用，存 data_json.samples；对应独立样地导出模板）──
+# 样地号自动递增（auto：前端不渲染输入框，添加/删除时自动编号）；死亡株数=种植-成活
+# 不录入（导出模板 E 列公式自动算）；坐标为样地 GPS 按钮一键获取；
+# 照片仅存相册文件名（sample.photos），不上传、不参与统计运算。
+_SAMPLES_FIELD = {
+    "key": "samples",
+    "label": "样地调查",
+    "type": "sample_array",
+    "group": "样地",
+    "required": False,
+    "sample_fields": [
+        {"key": "no", "label": "样地号", "type": "number", "required": False, "auto": True},
+        {"key": "area", "label": "样地面积(平方米)", "type": "number", "required": False},
+        {"key": "planted", "label": "种植株数", "type": "number", "required": False},
+        {"key": "alive", "label": "成活株数", "type": "number", "required": False},
+        {"key": "x", "label": "坐标x(经度)", "type": "number", "required": False},
+        {"key": "y", "label": "坐标y(纬度)", "type": "number", "required": False},
+    ],
+}
+
+# ── 样地统计（computed，对应基本信息模板 苗木合格率 组：查数株数/合格株树/合格率）──
+# 查数株数=Σ种植株数；合格率=Σ成活株数÷Σ种植株数×100；合格株数=round(查数株数×合格率)
+_SAMPLE_STATS = [
+    {"key": "planted_total", "label": "小班查数株数", "type": "computed", "formula": "s_planted_total", "group": "苗木合格率", "col_span": "third"},
+    {"key": "qualified_count", "label": "合格株树", "type": "computed", "formula": "s_qualified_count", "group": "苗木合格率", "col_span": "third"},
+    {"key": "qualified_rate", "label": "合格率", "type": "computed", "formula": "s_qualified_rate", "group": "苗木合格率", "col_span": "third"},
+]
+
+# ── 打卡坐标（打卡时自动填充 GPS，只读展示；导出对应 表1 AV/AW）──
+_CHECKIN_COORDS = [
+    {"key": "sample_coord_x", "label": "打卡坐标x(经度)", "type": "number", "group": "打卡", "required": False, "readOnly": True, "col_span": "half"},
+    {"key": "sample_coord_y", "label": "打卡坐标y(纬度)", "type": "number", "group": "打卡", "required": False, "readOnly": True, "col_span": "half"},
 ]
 
 # ── 通用率类字段（施工率/建档率/管护率/抚育率） ──
@@ -176,18 +226,20 @@ TABLES = [
         "data_rows": 5,  # 模板预留数据行数
         "prefilled_columns": [
             {"key": "city", "label": "州(市)", "col": "A"},
-            {"key": "county", "label": "县", "col": "B"},
-            {"key": "township", "label": "乡", "col": "C"},
-            {"key": "village", "label": "村", "col": "D"},
-            {"key": "forest_compartment", "label": "林班", "col": "E"},
-            {"key": "subcompartment", "label": "小班", "col": "F"},
-            {"key": "check_type", "label": "验收类别", "col": "G"},
-            {"key": "project_name", "label": "项目名称", "col": "H"},
-            {"key": "plan_year", "label": "计划年度", "col": "I"},
-            {"key": "work_year", "label": "作业年度", "col": "J"},
-            {"key": "ownership", "label": "林地所有权", "col": "K"},
-            {"key": "tree_species", "label": "造林树种", "col": "L"},
-            {"key": "reported_area", "label": "上报面积", "col": "M", "unit": "亩"},
+            {"key": "subcompartment", "label": "调查小班号", "col": "B"},
+            {"key": "county", "label": "县", "col": "C"},
+            {"key": "township", "label": "乡", "col": "D"},
+            {"key": "village", "label": "村", "col": "E"},
+            {"key": "forest_compartment", "label": "林班", "col": "F"},
+            {"key": "subcompartment_orig", "label": "小班(原始)", "col": "G"},
+            {"key": "check_type", "label": "验收类别", "col": "H"},
+            {"key": "project_name", "label": "项目名称", "col": "I"},
+            {"key": "plan_year", "label": "计划年度", "col": "J"},
+            {"key": "work_year", "label": "作业年度", "col": "K"},
+            {"key": "ownership", "label": "林地所有权", "col": "L"},
+            {"key": "tree_species", "label": "造林树种", "col": "M"},
+            {"key": "reported_area", "label": "上报面积", "col": "N", "unit": "亩"},
+            {"key": "design_count", "label": "小班设计株树", "col": "AQ"},  # GDB 需苗量/小班设计株树
         ],
         "input_columns": [
             # 成活率等级
@@ -205,28 +257,12 @@ TABLES = [
             {"key": "unqualified_reason", "label": "造林不合格原因", "type": "text", "group": "原因", "col_span": "half"},
             {"key": "loss_reason", "label": "损失原因", "type": "text", "group": "原因", "col_span": "half"},
         ] + _MGMT_FIELDS + _rate_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _rate_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _rate_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
-            # ── 样方调查（宽表 1:1，参考 AT3:BJ3）──
-            # 调查样地号/每亩面积/每亩设计株树 从密点文件读取（prefilled，只读）
-            # 样1~样5 成活株树为输入；样地数量/平均成活株树/小班平均成活率为公式自动计算
-            {"key": "sample_plot_no", "label": "调查样地号", "type": "text", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "sample_coord_x", "label": "样地坐标x", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_coord_y", "label": "样地坐标y", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_area", "label": "样地面积(m2)", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "survival_1", "label": "样地成活株树-样1", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_2", "label": "样地成活株树-样2", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_3", "label": "样地成活株树-样3", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_4", "label": "样地成活株树-样4", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_5", "label": "样地成活株树-样5", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "sample_count", "label": "样地数量", "type": "computed", "formula": "t1_sample_count", "group": "样方", "col_span": "half"},
-            {"key": "avg_survival", "label": "平均样地成活株树", "type": "computed", "formula": "t1_avg_survival", "group": "样方", "col_span": "half"},
-            {"key": "mu_area", "label": "每亩面积", "type": "number", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "mu_design_count", "label": "每亩设计株树", "type": "number", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "avg_survival_rate", "label": "小班平均成活率", "type": "computed", "formula": "t1_avg_survival_rate", "group": "样方", "col_span": "half"},
-            {"key": "forest_ratio", "label": "造林比例", "type": "percent", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "preserve_rate", "label": "保存率", "type": "percent", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_remark", "label": "备注1", "type": "text", "group": "样方", "required": False, "col_span": "full"},
+            # ── 样地调查（弹窗录入，独立样地模板导出）──
+            _SAMPLES_FIELD,
+        ] + _SAMPLE_STATS + _CHECKIN_COORDS + [
             _INSPECTOR, _INSPECT_TIME, _REMARK,
             {"key": "co_inspector", "label": "配合验收人员", "type": "text", "group": "验收", "required": False, "default": "", "col_span": "half"},
+            _SURVEY_DONE,
         ],
     },
 
@@ -241,22 +277,29 @@ TABLES = [
         "data_rows": 5,
         "prefilled_columns": [
             {"key": "city", "label": "州(市)", "col": "A"},
-            {"key": "county", "label": "县", "col": "B"},
-            {"key": "township", "label": "乡", "col": "C"},
-            {"key": "village", "label": "村", "col": "D"},
-            {"key": "subcompartment", "label": "小班", "col": "E"},
-            {"key": "check_type", "label": "验收类别", "col": "F"},
-            {"key": "project_name", "label": "项目名称", "col": "G"},
-            {"key": "plan_year", "label": "计划年度", "col": "H"},
-            {"key": "start_year", "label": "始封年度", "col": "I"},
-            {"key": "ownership", "label": "林地所有权", "col": "J"},
-            {"key": "seal_target", "label": "封育对象", "col": "K"},
-            {"key": "seal_years", "label": "封育年限", "col": "L"},
-            {"key": "seal_type", "label": "封育类型", "col": "M"},
-            {"key": "seal_method", "label": "封育方式", "col": "N"},
-            {"key": "seal_measure", "label": "封育措施", "col": "O"},
-            {"key": "forest_measure", "label": "育林措施", "col": "P"},
-            {"key": "reported_area", "label": "上报面积", "col": "Q", "unit": "亩"},
+            {"key": "subcompartment", "label": "调查小班号", "col": "B"},
+            {"key": "county", "label": "县", "col": "C"},
+            {"key": "township", "label": "乡", "col": "D"},
+            {"key": "village", "label": "村", "col": "E"},
+            {"key": "subcompartment_orig", "label": "小班(原始)", "col": "F"},
+            {"key": "check_type", "label": "验收类别", "col": "G"},
+            {"key": "project_name", "label": "项目名称", "col": "H"},
+            {"key": "plan_year", "label": "计划年度", "col": "I"},
+            {"key": "start_year", "label": "始封年度", "col": "J"},
+            {"key": "ownership", "label": "林地所有权", "col": "K"},
+            {"key": "seal_target", "label": "封育对象", "col": "L"},
+            {"key": "seal_years", "label": "封育年限", "col": "M"},
+            {"key": "seal_type", "label": "封育类型", "col": "N"},
+            {"key": "seal_method", "label": "封育方式", "col": "O"},
+            {"key": "seal_measure", "label": "封育措施", "col": "P"},
+            {"key": "forest_measure", "label": "育林措施", "col": "Q"},
+            {"key": "tree_species", "label": "造林树种", "col": "R"},
+            {"key": "reported_area", "label": "上报面积", "col": "S", "unit": "亩"},
+            {"key": "replant_area", "label": "补植面积", "col": "T", "unit": "亩"},
+            {"key": "dominant_species", "label": "优势树种", "col": "AF"},
+            {"key": "pre_land_type", "label": "封前地类", "col": "AG"},
+            {"key": "canopy_cover", "label": "郁闭度", "col": "AI"},
+            {"key": "design_count", "label": "小班设计株树", "col": "BH"},
         ],
         "input_columns": [
             {"key": "survival_pass", "label": "成活率-合格", "type": "percent", "group": "成活率", "col_span": "third"},
@@ -270,11 +313,8 @@ TABLES = [
             {"key": "area_short_reason", "label": "面积核实不足原因", "type": "text", "group": "原因", "col_span": "full"},
             {"key": "unqualified_reason", "label": "造林不合格原因", "type": "text", "group": "原因", "col_span": "half"},
             {"key": "loss_reason", "label": "损失原因", "type": "text", "group": "原因", "col_span": "half"},
-            # 封育因子
-            {"key": "dominant_species", "label": "优势树种(组)", "type": "text", "group": "封育因子", "col_span": "half"},
-            {"key": "pre_land_type", "label": "封前地类", "type": "text", "group": "封育因子", "col_span": "half"},
+            # 封育因子（现地类为现地调查录入；优势树种/封前地类/郁闭度为 GDB 绿色预填）
             {"key": "cur_land_type", "label": "现地类", "type": "text", "group": "封育因子", "col_span": "half"},
-            {"key": "canopy_cover", "label": "郁闭度(覆盖度)", "type": "number", "group": "封育因子", "col_span": "half", "min": 0, "max": 1, "step": 0.01},
             # 针叶树株数
             {"key": "conifer_mother", "label": "针叶树-母树(株/亩)", "type": "number", "group": "株数调查", "col_span": "third"},
             {"key": "conifer_seedling", "label": "针叶树-幼苗(株/亩)", "type": "number", "group": "株数调查", "col_span": "third"},
@@ -284,25 +324,10 @@ TABLES = [
             {"key": "broadleaf_sapling", "label": "阔叶树-幼树(株/亩)", "type": "number", "group": "株数调查", "col_span": "third"},
             {"key": "bamboo_count", "label": "乔木根株或毛竹(株/亩)", "type": "number", "group": "株数调查", "col_span": "full"},
         ] + _MGMT_FIELDS + _rate_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _rate_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _rate_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
-            # ── 样方调查（宽表 1:1，参照 table1 结构）──
-            {"key": "sample_plot_no", "label": "调查样地号", "type": "text", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "sample_coord_x", "label": "样地坐标x", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_coord_y", "label": "样地坐标y", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_area", "label": "样地面积(m2)", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "survival_1", "label": "样地成活株树-样1", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_2", "label": "样地成活株树-样2", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_3", "label": "样地成活株树-样3", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_4", "label": "样地成活株树-样4", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_5", "label": "样地成活株树-样5", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "sample_count", "label": "样地数量", "type": "computed", "formula": "t1_sample_count", "group": "样方", "col_span": "half"},
-            {"key": "avg_survival", "label": "平均样地成活株树", "type": "computed", "formula": "t1_avg_survival", "group": "样方", "col_span": "half"},
-            {"key": "mu_area", "label": "每亩面积", "type": "number", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "mu_design_count", "label": "每亩设计株树", "type": "number", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "avg_survival_rate", "label": "小班平均成活率", "type": "computed", "formula": "t1_avg_survival_rate", "group": "样方", "col_span": "half"},
-            {"key": "forest_ratio", "label": "造林比例", "type": "percent", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "preserve_rate", "label": "保存率", "type": "percent", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_remark", "label": "备注1", "type": "text", "group": "样方", "required": False, "col_span": "full"},
-            _INSPECTOR, _INSPECT_TIME, _REMARK,
+            # ── 样地调查（弹窗录入，独立样地模板导出）──
+            _SAMPLES_FIELD,
+        ] + _SAMPLE_STATS + _CHECKIN_COORDS + [
+            _INSPECTOR, _INSPECT_TIME, _REMARK, _SURVEY_DONE,
         ],
     },
 
@@ -317,17 +342,24 @@ TABLES = [
         "data_rows": 6,
         "prefilled_columns": [
             {"key": "city", "label": "州(市)", "col": "A"},
-            {"key": "county", "label": "县", "col": "B"},
-            {"key": "township", "label": "乡", "col": "C"},
-            {"key": "village", "label": "村", "col": "D"},
-            {"key": "forest_compartment", "label": "林班", "col": "E"},
-            {"key": "subcompartment", "label": "小班", "col": "F"},
-            {"key": "check_type", "label": "验收类别", "col": "G"},
-            {"key": "project_name", "label": "项目名称", "col": "H"},
-            {"key": "plan_year", "label": "计划年度", "col": "I"},
-            {"key": "work_year", "label": "作业年度", "col": "J"},
-            {"key": "ownership", "label": "林地所有权", "col": "K"},
-            {"key": "reported_area", "label": "上报面积", "col": "L", "unit": "亩"},
+            {"key": "subcompartment", "label": "调查小班号", "col": "B"},
+            {"key": "county", "label": "县", "col": "C"},
+            {"key": "township", "label": "乡", "col": "D"},
+            {"key": "village", "label": "村", "col": "E"},
+            {"key": "forest_compartment", "label": "林班", "col": "F"},
+            {"key": "subcompartment_orig", "label": "小班(原始)", "col": "G"},
+            {"key": "check_type", "label": "验收类别", "col": "H"},
+            {"key": "project_name", "label": "项目名称", "col": "I"},
+            {"key": "plan_year", "label": "计划年度", "col": "J"},
+            {"key": "work_year", "label": "作业年度", "col": "K"},
+            {"key": "ownership", "label": "林地所有权", "col": "L"},
+            {"key": "tree_species", "label": "造林树种", "col": "M"},
+            {"key": "reported_area", "label": "上报面积", "col": "N", "unit": "亩"},
+            {"key": "replant_area", "label": "补植面积", "col": "O", "unit": "亩"},
+            {"key": "repair_measure", "label": "修复措施", "col": "AA"},
+            {"key": "repair_method", "label": "修复方式", "col": "AB"},
+            {"key": "auxiliary_measure", "label": "辅助措施", "col": "AC"},
+            {"key": "design_count", "label": "小班设计株树", "col": "AU"},
         ],
         "input_columns": [
             {"key": "survival_pass", "label": "成活率-合格", "type": "percent", "group": "成活率", "col_span": "third"},
@@ -341,119 +373,14 @@ TABLES = [
             {"key": "area_short_reason", "label": "面积核实不足原因", "type": "text", "group": "原因", "col_span": "full"},
             {"key": "unqualified_reason", "label": "造林不合格原因", "type": "text", "group": "原因", "col_span": "half"},
             {"key": "loss_reason", "label": "损失原因", "type": "text", "group": "原因", "col_span": "half"},
-            # 修复措施
-            {"key": "repair_measure", "label": "修复措施", "type": "text", "group": "修复方式", "col_span": "full"},
-            {"key": "repair_method", "label": "修复方式", "type": "text", "group": "修复方式", "col_span": "half"},
-            {"key": "auxiliary_measure", "label": "辅助措施", "type": "text", "group": "修复方式", "col_span": "half"},
         ] + _MGMT_FIELDS + _rate_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _rate_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _rate_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
-            # ── 样方调查（宽表 1:1，参照 table1 结构）──
-            {"key": "sample_plot_no", "label": "调查样地号", "type": "text", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "sample_coord_x", "label": "样地坐标x", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_coord_y", "label": "样地坐标y", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_area", "label": "样地面积(m2)", "type": "number", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "survival_1", "label": "样地成活株树-样1", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_2", "label": "样地成活株树-样2", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_3", "label": "样地成活株树-样3", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_4", "label": "样地成活株树-样4", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "survival_5", "label": "样地成活株树-样5", "type": "number", "group": "样方", "required": False, "col_span": "fifth"},
-            {"key": "sample_count", "label": "样地数量", "type": "computed", "formula": "t1_sample_count", "group": "样方", "col_span": "half"},
-            {"key": "avg_survival", "label": "平均样地成活株树", "type": "computed", "formula": "t1_avg_survival", "group": "样方", "col_span": "half"},
-            {"key": "mu_area", "label": "每亩面积", "type": "number", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "mu_design_count", "label": "每亩设计株树", "type": "number", "group": "样方", "required": False, "readOnly": True, "col_span": "half"},
-            {"key": "avg_survival_rate", "label": "小班平均成活率", "type": "computed", "formula": "t1_avg_survival_rate", "group": "样方", "col_span": "half"},
-            {"key": "forest_ratio", "label": "造林比例", "type": "percent", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "preserve_rate", "label": "保存率", "type": "percent", "group": "样方", "required": False, "col_span": "half"},
-            {"key": "sample_remark", "label": "备注1", "type": "text", "group": "样方", "required": False, "col_span": "full"},
-            _INSPECTOR, _INSPECT_TIME, _REMARK,
+            # ── 样地调查（弹窗录入，独立样地模板导出）──
+            _SAMPLES_FIELD,
+        ] + _SAMPLE_STATS + _CHECKIN_COORDS + [
+            _INSPECTOR, _INSPECT_TIME, _REMARK, _SURVEY_DONE,
         ],
     },
 
-    # ════════════════════════════════════════════
-    # 表4 — 水利水保设施验收因子表
-    # ════════════════════════════════════════════
-    {
-        "id": "table4",
-        "name": "水利水保设施验收",
-        "sheet_name": "表4-水利水保设施验收因子表",
-        "description": "小型水利水保设施质量抽查因子现场核查",
-        "data_rows": 5,
-        "prefilled_columns": [
-            {"key": "city", "label": "州(市)", "col": "A"},
-            {"key": "county", "label": "县", "col": "B"},
-            {"key": "township", "label": "乡", "col": "C"},
-            {"key": "village", "label": "村", "col": "D"},
-            {"key": "check_type", "label": "验收类别", "col": "E"},
-            {"key": "project_name", "label": "项目名称", "col": "F"},
-            {"key": "plan_year", "label": "计划年度", "col": "G"},
-            {"key": "work_year", "label": "作业年度", "col": "H"},
-        ],
-        "input_columns": [
-            # 6组 设计/验收/是否一致
-            {"key": "radiation_design", "label": "辐射小班-设计", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "radiation_actual", "label": "辐射小班-验收", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "radiation_match", "label": "辐射小班-是否一致", "type": "enum", "options": ["一致", "不一致"], "group": "验收抽查内容", "col_span": "third"},
-            {"key": "content_design", "label": "建设内容-设计", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "content_actual", "label": "建设内容-验收", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "content_match", "label": "建设内容-是否一致", "type": "enum", "options": ["一致", "不一致"], "group": "验收抽查内容", "col_span": "third"},
-            {"key": "scale_design", "label": "建设规模-设计", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "scale_actual", "label": "建设规模-验收", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "scale_match", "label": "建设规模-是否一致", "type": "enum", "options": ["一致", "不一致"], "group": "验收抽查内容", "col_span": "third"},
-            {"key": "location_design", "label": "建设位置-设计", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "location_actual", "label": "建设位置-验收", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "location_match", "label": "建设位置-是否一致", "type": "enum", "options": ["一致", "不一致"], "group": "验收抽查内容", "col_span": "third"},
-            {"key": "material_design", "label": "建设材料-设计", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "material_actual", "label": "建设材料-验收", "type": "text", "group": "验收抽查内容", "col_span": "third"},
-            {"key": "material_match", "label": "建设材料-是否一致", "type": "enum", "options": ["一致", "不一致"], "group": "验收抽查内容", "col_span": "third"},
-            {"key": "irrigation_design", "label": "灌溉面积-设计", "type": "number", "group": "验收抽查内容", "unit": "亩", "col_span": "third"},
-            {"key": "irrigation_actual", "label": "灌溉面积-验收", "type": "number", "group": "验收抽查内容", "unit": "亩", "col_span": "third"},
-            {"key": "irrigation_match", "label": "灌溉面积-是否一致", "type": "enum", "options": ["一致", "不一致"], "group": "验收抽查内容", "col_span": "third"},
-            {"key": "qualified", "label": "是否合格", "type": "enum", "options": ["合格", "不合格"], "group": "验收结论", "required": True, "col_span": "full"},
-            _INSPECTOR, _INSPECT_TIME, _REMARK,
-        ],
-    },
-
-    # ════════════════════════════════════════════
-    # 表5 — 草原现场验收表（小班级字段 + 样方子数组）
-    # 一对一模型：每小班一行；样方收编为 samples 子数组（type=sample_array）。
-    # 原子表 table5a 字段 → table5 顶层字段；table5b 字段 → samples.sample_fields。
-    # ════════════════════════════════════════════
-    {
-        "id": "table5",
-        "name": "草原现场验收",
-        "sheet_name": "表5-草原现场验收表",
-        "description": "草原现场验收（小班级调查 + 样方级调查）",
-        "data_rows": 5,
-        "prefilled_columns": [
-            {"key": "city", "label": "州(市)", "col": "A"},
-            {"key": "county", "label": "县", "col": "B"},
-            {"key": "township", "label": "乡镇", "col": "C"},
-            {"key": "village", "label": "村", "col": "D"},
-            {"key": "subcompartment", "label": "小班号", "col": "E"},
-            {"key": "manage_area", "label": "小班经营面积", "col": "F", "unit": "亩"},
-        ],
-        "input_columns": [
-            # ── 小班级字段（原 table5a）──
-            {"key": "verified_area", "label": "核实面积", "type": "number", "group": "基本", "unit": "亩", "required": True, "col_span": "half"},
-            {"key": "area_score", "label": "面积得分", "type": "number", "group": "基本", "min": 0, "max": 100, "col_span": "half"},
-            {"key": "sow_score", "label": "播种完成情况得分", "type": "number", "group": "得分", "min": 0, "max": 100, "col_span": "third"},
-            {"key": "land_prep_score", "label": "整地完成情况得分", "type": "number", "group": "得分", "min": 0, "max": 100, "col_span": "third"},
-            {"key": "weed_score", "label": "除杂完成情况得分", "type": "number", "group": "得分", "min": 0, "max": 100, "col_span": "third"},
-            {"key": "fence_status", "label": "围栏建设情况", "type": "text", "group": "基本", "col_span": "full"},
-            {"key": "completion_time", "label": "项目完成时间", "type": "date", "group": "基本", "col_span": "half"},
-            {"key": "planned_species", "label": "计划种植品种", "type": "text", "group": "基本", "col_span": "half"},
-            # ── 样方字段（1:1 宽表，原 table5b 字段平铺）──
-            {"key": "sample_id", "label": "样方(线)编号", "type": "text", "group": "样方", "required": True, "col_span": "half"},
-            {"key": "longitude", "label": "经度", "type": "number", "group": "样方", "col_span": "half"},
-            {"key": "latitude", "label": "纬度", "type": "number", "group": "样方", "col_span": "half"},
-            {"key": "seedling_species", "label": "出苗品种", "type": "text", "group": "样方", "col_span": "half"},
-            {"key": "seedling_score", "label": "出苗品种得分", "type": "number", "group": "样方", "min": 0, "max": 100, "col_span": "half"},
-            {"key": "actual_cover", "label": "实际盖度", "type": "percent", "group": "样方", "col_span": "half"},
-            {"key": "cover_score", "label": "实际盖度得分", "type": "number", "group": "样方", "min": 0, "max": 100, "col_span": "half"},
-            {"key": "sample_score", "label": "样方(线)得分", "type": "number", "group": "样方", "min": 0, "max": 100, "col_span": "half"},
-            {"key": "unqualified_reason", "label": "不合格原因", "type": "text", "group": "样方", "col_span": "full"},
-            _INSPECTOR, _INSPECT_TIME, _REMARK,
-        ],
-    },
 ]
 
 # ── 索引：id → table dict ──

@@ -21,11 +21,14 @@
   POST /survey/api/subcompartments/rows/<row_id>/checkin  打卡
   POST /survey/api/subcompartments/rows/<row_id>/track    轨迹
   POST /survey/api/subcompartments/rows/<row_id>/photos   照片
-  GET  /survey/api/projects/<pid>/export           导出 xlsx
+  GET  /survey/api/projects/<pid>/export_base     导出基本信息 xlsx（?cat=分类 仅该分类）
+  GET  /survey/api/projects/<pid>/export_samples  导出样地 xlsx（?sc=小班id 仅该小班）
+  GET  /survey/api/projects/<pid>/export_tracks   导出轨迹 GPX zip
 """
 import os
 import sys
 import json
+import gzip as _gzip_mod
 from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -63,6 +66,43 @@ def _api_no_store(resp):
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
+    return resp
+
+
+# 可压缩类型：文本类静态资源与 JSON（xlsx/zip/图片等二进制不压）
+_GZIP_TYPES = ("text/", "application/javascript", "application/x-javascript",
+               "application/json", "image/svg+xml")
+
+
+@app.after_request
+def _gzip_response(resp):
+    """JS/CSS/大 JSON 自动 gzip（App WebView 弱网提速，110K JS ≈ 25K）。
+    条件：客户端声明支持 gzip + 可压缩类型 + 200 + 体积 ≥ 1KB + 未带编码。"""
+    if resp.headers.get("Content-Encoding"):
+        return resp
+    if "gzip" not in (request.headers.get("Accept-Encoding") or ""):
+        return resp
+    if resp.status_code != 200:
+        return resp
+    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if not (ctype.startswith("text/") or ctype in _GZIP_TYPES):
+        return resp
+    try:
+        data = resp.get_data()
+    except Exception:
+        return resp
+    if len(data) < 1024:
+        return resp
+    try:
+        comp = _gzip_mod.compress(data, 6)
+    except Exception:
+        return resp
+    if len(comp) >= len(data):
+        return resp
+    resp.set_data(comp)
+    resp.headers["Content-Encoding"] = "gzip"
+    resp.headers["Vary"] = "Accept-Encoding"
+    # ETag 保留：下次 If-None-Match 命中仍可 304 零传输
     return resp
 
 
@@ -390,28 +430,58 @@ def api_save_photos(row_id):
 
 
 # ── 导出 ──
+# 用户端：基本信息（按当前分类）+ 样地（单小班/整项目）+ 轨迹 GPX。
 
-@app.route("/api/projects/<pid>/export")
+@app.route("/api/projects/<pid>/export_base")
 @_login_required
-def api_export(pid):
+def api_export_base(pid):
+    """基本信息导出：?cat=<分类> 仅导出该分类（topbar「导出」按钮）；缺省整项目 3 分类。"""
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
-    # ?project_name= 按项目名称导出（每个项目名称一份文件，按分类分 sheet）
-    project_name = request.args.get("project_name", "") or None
+    cat = request.args.get("cat", "").strip()
     try:
-        if project_name:
-            output, stats = exporter.export_project_name(project_name, pid)
-            filename = f"{project_name}_验收数据.xlsx"
-        else:
-            output, stats = exporter.export_project(pid)
-            filename = f"{proj['name']}_验收数据.xlsx"
+        output, stats = exporter.export_base(pid, category=cat or None)
+        filename = f"{proj['name']}_{cat}_基本信息.xlsx" if cat else f"{proj['name']}_基本信息.xlsx"
         return send_file(
             output,
             as_attachment=True,
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"导出失败: {e}"}), 500
+
+
+@app.route("/api/projects/<pid>/export_samples")
+@_login_required
+def api_export_samples(pid):
+    """样地页导出：?sc=<小班id> 仅导出该小班（sheet 名「分类-调查小班号」）；缺省整项目。"""
+    proj = storage.get_project(pid)
+    if not proj:
+        return jsonify({"error": "项目不存在"}), 404
+    sc_id = request.args.get("sc", "").strip()
+    try:
+        output, stats = exporter.export_samples(pid, subcompartment_id=sc_id or None)
+        if sc_id:
+            sc = storage.get_subcompartment_row(sc_id)
+            cat = (sc or {}).get("category") or ""
+            no = (sc or {}).get("subcompartment") or (sc or {}).get("subcompartment_label") or ""
+            filename = f"{proj['name']}_{cat}_{no}_样地.xlsx"
+        else:
+            filename = f"{proj['name']}_样地.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         import traceback
         traceback.print_exc()

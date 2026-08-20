@@ -10,6 +10,11 @@
 import os
 import sys
 
+# 本地开发标志必须先于 app import 设置（app 在 import 时读取环境变量，
+# 否则 LOCAL_DEV=False 导致本地也要登录）
+os.environ.setdefault("SURVEY_LOCAL_DEV", "1")
+os.environ.setdefault("SURVEY_LOCAL_USER", "本地测试员")
+
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from werkzeug.exceptions import NotFound
 
@@ -34,9 +39,6 @@ def main():
             port = int(sys.argv[1])
         except ValueError:
             pass
-
-    os.environ.setdefault("SURVEY_LOCAL_DEV", "1")
-    os.environ.setdefault("SURVEY_LOCAL_USER", "本地测试员")
 
     print("=" * 60)
     print("  林业野外调查系统 — 本地测试模式")

@@ -221,6 +221,17 @@ function computeGroups(fields) {
 // ── 初始化 ──
 async function init() {
   renderShell();
+  // Android 物理返回键：样地页返回小班页（默认 goBack 无 SPA 历史会直接退出 App）
+  try {
+    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
+      window.Capacitor.Plugins.App.addListener('backbutton', async () => {
+        if (state.view === 'samples') { await smLeaveToGrid(); return; }
+        // 其余视图走浏览器历史（无历史时退出 App）
+        if (window.history.length > 1) window.history.back();
+        else if (navigator.app && navigator.app.exitApp) navigator.app.exitApp();
+      });
+    }
+  } catch (e) { /* 非原生环境忽略 */ }
   // 启动即预先申请默认权限（定位/相机）；内部等待 Capacitor Bridge 就绪，不阻塞页面渲染
   checkAppPermissions();
   try {
@@ -352,6 +363,9 @@ function renderApp() {
   } else if (state.view === 'survey_grid') {
     body.innerHTML = renderSurveyGridPage();
     bindSurveyGridPage();
+  } else if (state.view === 'samples') {
+    body.innerHTML = renderSamplesPage();
+    bindSamplesPage();
   } else {
     body.innerHTML = '<div class="empty-hint">未知页面</div>';
   }
@@ -363,9 +377,11 @@ function renderTopBar() {
   const displayName = state.currentUser ? (state.currentUser.display_name || state.currentUser.username || '') : '';
   const backBtn = state.view === 'sc_list'
     ? '<button class="btn-back" data-action="go-projects" title="返回项目列表">‹</button>'
-    : ((state.view === 'survey' || state.view === 'survey_grid')
-      ? '<button class="btn-back" data-action="go-sc-list" title="返回小班列表">‹</button>'
-      : '');
+    : (state.view === 'samples'
+      ? '<button class="btn-back" data-action="go-grid" title="返回小班">‹</button>'
+      : ((state.view === 'survey' || state.view === 'survey_grid')
+        ? '<button class="btn-back" data-action="go-sc-list" title="返回小班列表">‹</button>'
+        : ''));
   let viewTitle = '';
   if (state.view === 'projects') {
     viewTitle = '<span class="topbar-title">项目列表</span>';
@@ -379,6 +395,8 @@ function renderTopBar() {
     const scLabel = state.gridSubcompartment ? (state.gridSubcompartment.subcompartment_label || '') : '';
     const tail = scLabel ? ` · ${escapeHtml(scLabel)}` : '';
     viewTitle = `<span class="topbar-title">📊 ${escapeHtml(catLabel)}${tail} · ${escapeHtml((tdef && tdef.name) || '网格调查')}</span>`;
+  } else if (state.view === 'samples' && state.gridSubcompartment) {
+    viewTitle = `<span class="topbar-title">🌱 样地调查 · ${escapeHtml(state.gridSubcompartment.subcompartment_label || '')}</span>`;
   }
   tb.innerHTML = `
     <div class="topbar-left">
@@ -387,7 +405,8 @@ function renderTopBar() {
     </div>
     <div class="topbar-right">
       <button class="btn-icon help-btn" data-action="open-help" title="使用说明">?</button>
-      ${(state.view === 'survey' || state.view === 'survey_grid') ? '<button class="btn-export" data-action="export">导出</button><button class="btn-export" data-action="export-tracks" title="导出项目全部轨迹（GPX，按小班打包 ZIP）">轨迹</button>' : ''}
+      ${(state.view === 'survey_grid' || state.view === 'samples') ? `<button class="btn-export" data-action="export-base" title="导出基本信息 Excel（当前项目${currentBaseExportCategory() ? '，仅「' + escapeHtml(currentBaseExportCategory()) + '」分类' : '，全部分类'}）">导出</button>` : ''}
+      ${(state.view === 'survey' || state.view === 'survey_grid' || state.view === 'samples') ? '<button class="btn-export" data-action="export-tracks" title="导出项目全部轨迹（GPX，按小班打包 ZIP）">轨迹</button>' : ''}
       <span class="user-display" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</span>
       <button class="btn-logout" data-action="logout" title="登出">登出</button>
     </div>
@@ -873,6 +892,7 @@ function renderGridToolbar() {
     <button class="btn-grid-action" data-action="sc-photo">照片</button>
     <button class="btn-grid-action" data-action="sc-track">轨迹</button>
     <button class="btn-grid-action" data-action="sc-checkin">打卡</button>
+    <button class="btn-grid-action" data-action="sc-samples">样地</button>
   ` : '';
 
   return `<div class="grid-toolbar">
@@ -939,30 +959,40 @@ async function loadGridSubcompartmentData() {
 }
 
 // 公式计算：根据 formula 名和数据计算 computed 字段值
+// 样地统计（与导出端 _sample_stats 同口径）：
+//   查数株数 = Σ种植株数；合格率 = Σ成活÷Σ种植×100（保留2位）；合格株树 = round(查数株数×合格率÷100)
 function computeFieldValue(formula, data) {
-  const sVals = [1,2,3,4,5].map(i => data['survival_'+i]).filter(v => v !== '' && v != null && !isNaN(Number(v)));
+  const samples = data && Array.isArray(data.samples) ? data.samples : [];
+  let planted = 0, alive = 0;
+  samples.forEach(s => {
+    if (!s) return;
+    planted += Number(s.planted) || 0;
+    alive += Number(s.alive) || 0;
+  });
   switch (formula) {
-    case 't1_sample_count':
-      return sVals.length || '';
-    case 't1_avg_survival': {
-      if (!sVals.length) return '';
-      const sum = sVals.reduce((s, v) => s + Number(v), 0);
-      // 平均成活株数取整（与导出模板公式一致）
-      return String(Math.round(sum / sVals.length));
-    }
-    case 't1_avg_survival_rate': {
-      if (!sVals.length) return '';
-      const sum = sVals.reduce((s, v) => s + Number(v), 0);
-      const avg = Math.round(sum / sVals.length);            // 平均成活株数（取整）
-      const sa = Number(data['sample_area']) || 0;           // 样地面积 m²
-      const ma = Number(data['mu_area']) || 666.67;          // 每亩面积 m²（缺省 666.67）
-      const mc = Number(data['mu_design_count']) || 0;       // 每亩设计株树
-      if (!sa || !mc) return '';
-      // 成活率(%) = 平均成活株数 × 666.67 ÷ (样地面积 × 每亩设计株树) × 100
-      return ((avg * ma) / (sa * mc) * 100).toFixed(2);
+    case 's_planted_total':
+      return planted || '';
+    case 's_qualified_rate':
+      if (!planted) return '';
+      return (Math.round(alive / planted * 10000) / 100).toFixed(2);
+    case 's_qualified_count': {
+      if (!planted) return '';
+      const rate = Math.round(alive / planted * 10000) / 100;
+      return Math.round(planted * rate / 100) || '';
     }
     default: return '';
   }
+}
+
+// 刷新详情页全部 computed 字段显示（样地数据变化后调用）
+function refreshComputedDisplays() {
+  (activeInputColumns() || []).forEach(f => {
+    if (f.type !== 'computed') return;
+    const cv = computeFieldValue(f.formula, state.formData);
+    state.formData[f.key] = cv;
+    const el = qs(`[data-computed-val="${f.key}"]`);
+    if (el) el.textContent = cv === '' ? '自动计算' : cv;
+  });
 }
 
 // 默认模式两列表格：选定小班后，渲染该小班当前表的两列 Excel（左 label，右值）
@@ -1008,11 +1038,17 @@ async function renderSurveyForm() {
       return;
     }
     // readOnly 输入字段（从密点文件读取等）
-    rowFields.push({ kind: 'input', key: f.key, label: f.label, type: f.type, options: f.options || [], readOnly: !!f.readOnly });
+    rowFields.push({ kind: 'input', key: f.key, label: f.label, type: f.type, options: f.options || [], default: f.default, readOnly: !!f.readOnly });
     let v = sv[f.key];
     if (v == null) v = '';
     // 只读字段空值时回填小班预填值（每亩面积/每亩设计株树 等）
     if (f.readOnly && v === '' && pf[f.key] != null) v = String(pf[f.key]);
+    // enum：旧 checkbox 布尔数据归一 + 空值显示默认值（有/无、是/否）
+    if (f.type === 'enum' && f.options && f.options.length) {
+      if (v === true || v === 'true' || v === 1 || v === '1') v = f.options[0];
+      else if (v === false || v === 'false' || v === 0 || v === '0') v = (f.default && f.options.includes(f.default)) ? f.default : f.options[f.options.length - 1];
+      else if (v === '' && f.default && f.options.includes(f.default)) v = f.default;
+    }
     if (f.type === 'checkbox') v = (v === true || v === 'true' || v === 1 || v === '1' || v === '有') ? '是' : '否';
     data.push([f.label, String(v)]);
   });
@@ -1024,13 +1060,6 @@ async function renderSurveyForm() {
   ];
   if (state._grid) { try { state._grid.destroy(); } catch (e) {} state._grid = null; }
   container.innerHTML = '<div id="gridEl"></div>';
-  // 预填/computed/readOnly 单元格只读配置
-  const cellsConfig = {};
-  rowFields.forEach((f, i) => {
-    if (f.kind === 'prefilled' || f.kind === 'computed' || (f.kind === 'input' && f.readOnly)) {
-      cellsConfig[`B${i + 1}`] = { readOnly: true };
-    }
-  });
   // 表格高度：行高28px × 行数 + 表头32 + 边距，让所有行完整显示，外层容器滚动
   const rowH = 28;
   const headerH = 32;
@@ -1038,7 +1067,6 @@ async function renderSurveyForm() {
   state._grid = jspreadsheet(qs('#gridEl'), {
     data: data,
     columns: cols,
-    cells: cellsConfig,
     contextMenu: false,
     allowInsertRow: false,
     allowManualInsertRow: false,
@@ -1046,6 +1074,12 @@ async function renderSurveyForm() {
     tableOverflow: false,
     tableWidth: '100%',
     onchange: (instance, cell, x, y, value) => onGridCellChange(x, y, value),
+  });
+  // 黄色预填列/computed/只读字段：官方 setReadOnly API 锁定（阻断双击、键入、粘贴）
+  rowFields.forEach((f, i) => {
+    if (f.kind === 'prefilled' || f.kind === 'computed' || (f.kind === 'input' && f.readOnly)) {
+      try { state._grid.setReadOnly(`B${i + 1}`, true); } catch (e) { /* 忽略单格失败 */ }
+    }
   });
   // 让 gridEl 内的 jss 容器和 table 自然撑开高度，不截断
   const gridEl2 = qs('#gridEl');
@@ -1072,13 +1106,14 @@ async function renderSurveyForm() {
       } else if (f.kind === 'computed') {
         td.style.backgroundColor = '#e3f2fd';
       }
-      // enum 字段注入 select 下拉框
+      // enum 字段注入 select 下拉框（有默认值时不提供空选项）
       if (f.kind === 'input' && f.type === 'enum' && f.options && f.options.length && !f.readOnly) {
         const curVal = data[i][1] || '';
+        const hasDefault = !!(f.default && f.options.includes(f.default));
         const select = document.createElement('select');
         select.className = 'cell-enum-select';
         select.style.cssText = 'width:100%;height:100%;border:none;background:transparent;font-size:13px;cursor:pointer;';
-        select.innerHTML = '<option value=""></option>' + f.options.map(o =>
+        select.innerHTML = (hasDefault ? '' : '<option value=""></option>') + f.options.map(o =>
           `<option value="${escapeHtml(o)}" ${o === curVal ? 'selected' : ''}>${escapeHtml(o)}</option>`
         ).join('');
         select.addEventListener('change', () => {
@@ -1504,10 +1539,17 @@ function renderField(f) {
 function renderControl(f) {
   const v = state.formData[f.key];
   switch (f.type) {
-    case 'enum':
-      return `<div class="enum-btns">${(f.options || []).map(opt =>
-        `<button class="enum-btn ${v === opt ? 'active' : ''}" data-action="enum-select" data-field="${f.key}" data-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`
+    case 'enum': {
+      // 空值显示默认值；旧 checkbox 布尔数据归一（管理情况 有/无 等）
+      const opts = f.options || [];
+      let cur = v;
+      if (cur === true || cur === 'true') cur = opts[0];
+      else if (cur === false || cur === 'false') cur = (f.default && opts.includes(f.default)) ? f.default : opts[opts.length - 1];
+      else if (cur == null || cur === '') cur = f.default || '';
+      return `<div class="enum-btns">${opts.map(opt =>
+        `<button class="enum-btn ${cur === opt ? 'active' : ''}" data-action="enum-select" data-field="${f.key}" data-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`
       ).join('')}</div>`;
+    }
     case 'number': {
       const attrs = numAttrs(f);
       return `<input type="number" class="f-input" data-field="${f.key}" value="${escapeHtml(v)}" ${attrs}>`;
@@ -1539,6 +1581,10 @@ function renderControl(f) {
           <input type="file" accept="image/*" capture="environment" class="f-photo" data-field="${f.key}" hidden>
         </label>
       </div>`;
+    case 'computed': {
+      const cv = computeFieldValue(f.formula, state.formData);
+      return `<div class="computed-val" data-computed-val="${f.key}">${escapeHtml(cv === '' ? '自动计算' : cv)}</div>`;
+    }
     case 'sample_array':
       return renderSamplePanel(f);
     default:
@@ -1546,17 +1592,17 @@ function renderControl(f) {
   }
 }
 
-// ── 样方子数组编辑面板（table5 samples）──
+// ── 样地子数组编辑面板（samples，三表共用）──
 function renderSamplePanel(f) {
   const arr = state.formData[f.key];
   const samples = Array.isArray(arr) ? arr : [];
   let html = `<div class="sample-panel">
     <div class="sample-panel-head">
-      <span class="sample-count">共 ${samples.length} 个样方</span>
-      <button class="btn-sample-add" data-action="sample-add" data-sample-key="${f.key}">+ 添加样方</button>
+      <span class="sample-count">共 ${samples.length} 个样地</span>
+      <button class="btn-sample-add" data-action="sample-add" data-sample-key="${f.key}">+ 添加样地</button>
     </div>`;
   if (!samples.length) {
-    html += `<div class="sample-empty">暂无样方，点击「添加样方」开始录入</div>`;
+    html += `<div class="sample-empty">暂无样地，点击「添加样地」开始录入</div>`;
   } else {
     html += `<div class="sample-list">`;
     samples.forEach((s, i) => { html += renderSampleCard(f, s, i); });
@@ -1566,18 +1612,39 @@ function renderSamplePanel(f) {
   return html;
 }
 
+// 新建样地对象：字段按 sample_fields 初始化，样圆号自动递增
+function newSampleObject(sampleFields) {
+  const obj = {};
+  (sampleFields || []).forEach(sf => { obj[sf.key] = ''; });
+  obj.photos = [];
+  return obj;
+}
+
 function renderSampleCard(f, sample, idx) {
   const fieldsHtml = (f.sample_fields || []).map(sf => renderSampleField(sf, sample, idx, f.key)).join('');
+  const photos = Array.isArray(sample.photos) ? sample.photos.filter(Boolean) : [];
+  const photosTxt = photos.length
+    ? `<div class="sample-photo-names" title="${escapeHtml(photos.join('；'))}">📷 ${escapeHtml(photos.join('；'))}</div>`
+    : '';
   return `<div class="sample-card" data-sample-idx="${idx}">
     <div class="sample-card-head">
-      <span class="sample-card-title">样方 ${idx + 1}</span>
-      <button class="btn-sample-del" data-action="sample-del" data-sample-key="${f.key}" data-sample-idx="${idx}" title="删除样方">✕</button>
+      <span class="sample-card-title">样地 ${sample.no || idx + 1}</span>
+      <div class="sample-card-actions">
+        <button class="btn-gps" data-action="get-gps-sample" data-sample-key="${f.key}" data-sample-idx="${idx}" title="一键获取该样地坐标">📍坐标</button>
+        <label class="btn-photo" title="拍照（水印含样地号）">📷拍照
+          <input type="file" accept="image/*" capture="environment" class="f-sample-photo" data-sample-key="${f.key}" data-sample-idx="${idx}" hidden>
+        </label>
+        <button class="btn-sample-del" data-action="sample-del" data-sample-key="${f.key}" data-sample-idx="${idx}" title="删除样地">✕</button>
+      </div>
     </div>
     <div class="sample-card-body">${fieldsHtml}</div>
+    ${photosTxt}
   </div>`;
 }
 
 function renderSampleField(sf, sample, idx, sampleKey) {
+  // auto 字段（样地号）自动编号，不渲染输入框
+  if (sf.auto) return '';
   const v = sample[sf.key];
   const req = sf.required ? '<span class="req">*</span>' : '';
   const unit = sf.unit ? `(${sf.unit})` : '';
@@ -1689,6 +1756,10 @@ async function saveSurvey() {
   state.busy = true;
   const tid = state.currentTable;
   const pid = state.project.id;
+  // 样地统计（computed）随保存写入 data_json，与网格页行为一致
+  (def.input_columns || []).forEach(f => {
+    if (f.type === 'computed') state.formData[f.key] = computeFieldValue(f.formula, state.formData);
+  });
   const data = Object.assign({}, state.formData);
   const inspector = data.inspector || data.surveyor || state.user || '';
   const scId = state.subcompartment.id;
@@ -1719,11 +1790,65 @@ async function saveSurvey() {
   toast(isUpdate ? '已更新记录' : '已保存记录');
 }
 
-// ── 导出 ──
-function exportData() {
+// ── 导出（基本信息 Excel / 轨迹 GPX）──
+
+// 当前基本信息导出的分类：样地页取当前小班分类，网格页取分类筛选（空=全部分类）
+function currentBaseExportCategory() {
+  if (state.view === 'samples' && state.gridSubcompartment) return state.gridSubcompartment.category || '';
+  return state.gridCategory || '';
+}
+
+// 导出文件落盘：App 内走原生 MediaStore 写入 Download/验收导出/，toast 提示真实
+// 绝对路径便于手机查找；浏览器回退 <a download>。返回 true = 原生已保存（已提示路径）。
+async function downloadExportFile(blob, filename) {
+  if (isApp()) {
+    const plugin = permPlugin();
+    if (plugin && plugin.saveFile) {
+      try {
+        const base64 = await fileToBase64(blob);
+        const r = await plugin.saveFile({ base64, name: filename });
+        const p = r && r.path;
+        if (p) {
+          const dir = p.slice(0, p.lastIndexOf('/') + 1);
+          if (dir) state._exportSaveDir = dir;
+          toast(`已保存到：${p}`, 5000);
+          return true;
+        }
+      } catch (e) { /* 原生失败回退下载 */ }
+    }
+  }
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 3000);
+  } catch (e) { /* 下载失败不影响主流程 */ }
+  return false;
+}
+
+// 导出基本信息 Excel（当前项目 + 当前分类；分类为空 = 全部分类 3 个 sheet）
+async function exportBase() {
   if (!state.project) { toast('请先选择项目'); return; }
-  const url = `api/projects/${state.project.id}/export`;
-  window.open(url, '_blank');
+  const cat = currentBaseExportCategory();
+  toast('正在导出基本信息…', 1500);
+  try {
+    const q = cat ? `?cat=${encodeURIComponent(cat)}` : '';
+    const res = await fetch(`api/projects/${state.project.id}/export_base${q}`);
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || `导出失败 (${res.status})`);
+    }
+    const blob = await res.blob();
+    const filename = `${state.project.name}${cat ? '_' + cat : ''}_基本信息.xlsx`;
+    const nativeSaved = await downloadExportFile(blob, filename);
+    if (!nativeSaved) toast(cat ? `「${cat}」基本信息已导出` : '全部分类基本信息已导出');
+  } catch (e) {
+    toast('基本信息导出失败：' + e.message, 2500);
+  }
 }
 
 // 导出项目全部轨迹（GPX ZIP，按小班号有序打包）
@@ -1737,12 +1862,8 @@ async function exportTracks() {
       throw new Error(e.error || `导出失败 (${res.status})`);
     }
     const blob = await res.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${state.project.name}_轨迹GPX.zip`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast('轨迹已导出');
+    const nativeSaved = await downloadExportFile(blob, `${state.project.name}_轨迹GPX.zip`);
+    if (!nativeSaved) toast('轨迹已导出');
   } catch (e) {
     toast('轨迹导出失败：' + e.message, 2500);
   }
@@ -1767,7 +1888,7 @@ function getGPS() {
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
-// 样方 GPS：同时填入经度/纬度到指定样方条目
+// 样地 GPS：一键同时填入坐标x(经度)/坐标y(纬度)到指定样地条目
 function getSampleGPS(sampleKey, idx) {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
   toast('正在获取定位…', 1500);
@@ -1775,14 +1896,14 @@ function getSampleGPS(sampleKey, idx) {
     const lng = pos.coords.longitude.toFixed(6);
     const lat = pos.coords.latitude.toFixed(6);
     const arr = state.formData[sampleKey];
-    if (!Array.isArray(arr) || !arr[idx]) { toast('定位成功但样方已失效，请重试'); return; }
-    arr[idx].longitude = lng;
-    arr[idx].latitude = lat;
-    // 更新显示值
-    const lngEl = qs(`[data-gps-val="longitude"][data-sample-key="${sampleKey}"][data-sample-idx="${idx}"]`);
-    const latEl = qs(`[data-gps-val="latitude"][data-sample-key="${sampleKey}"][data-sample-idx="${idx}"]`);
-    if (lngEl) lngEl.textContent = lng;
-    if (latEl) latEl.textContent = lat;
+    if (!Array.isArray(arr) || !arr[idx]) { toast('定位成功但样地已失效，请重试'); return; }
+    arr[idx].x = lng;
+    arr[idx].y = lat;
+    // 更新输入框显示值
+    const xEl = qs(`[data-sample-field="x"][data-sample-key="${sampleKey}"][data-sample-idx="${idx}"]`);
+    const yEl = qs(`[data-sample-field="y"][data-sample-key="${sampleKey}"][data-sample-idx="${idx}"]`);
+    if (xEl) xEl.value = lng;
+    if (yEl) yEl.value = lat;
     toast('定位成功');
   }, err => {
     handleGeoError(err);
@@ -1806,12 +1927,13 @@ function openHelpModal() {
             <ol>
               <li><b>选择项目</b>：在项目列表点击项目卡片进入</li>
               <li><b>查找小班</b>：在小班列表搜索框输入乡镇/村/林班/小班号，或切换地图视图点击小班面</li>
-              <li><b>选择表格</b>：点击顶部标签切换表1~表5</li>
+              <li><b>选择表格</b>：点击顶部标签切换表1~表3（人工造林/封山育林/退化林修复）</li>
               <li><b>录入数据</b>：每个小班每张表仅一条记录，按分组填写字段后点击"保存"</li>
               <li><b>网格直填</b>：也可在小班列表点击"📊 网格调查"，在 Excel 式表格中直接编辑单元格</li>
-              <li><b>样方调查</b>：表5（草原）含样方子表，在详情页点击"添加样方"录入多条样方数据</li>
+              <li><b>样地调查</b>：选中小班后点工具栏"样地"按钮进入样地管理（"返回小班"切回），点"+ 添加样地"新增（样地号自动递增），填写面积/种植/成活株数，点"📍坐标"一键GPS定位，点"📷拍照"拍样地照片（按钮显示已拍张数，水印含样地号，照片不参与统计）</li>
+              <li><b>自动统计</b>：样地填好后，小班查数株数/合格株树/合格率自动计算</li>
               <li><b>打卡/轨迹/照片</b>：在小班列表点击对应按钮</li>
-              <li><b>导出数据</b>：在调查页点击右上角"导出"，下载 Excel 汇总文件</li>
+              <li><b>数据导出</b>：Excel 导出（基本信息/样地）请在管理后台操作；调查页右上角"轨迹"可导出本项目轨迹 GPX</li>
             </ol>
           </div>
           <div class="help-section">
@@ -1822,7 +1944,10 @@ function openHelpModal() {
               <li><b>有/无开关</b>：管理情况等字段，点击切换"有"或"无"</li>
               <li><b>GPS定位</b>：经纬度字段点击"获取GPS"自动定位（需授权定位权限）</li>
               <li><b>拍照</b>：图片字段点击按钮调用手机相机</li>
-              <li><b>样方增删</b>：表5样方面板点击"+ 添加样方"新增，点 ✕ 删除单个样方</li>
+              <li><b>样地增删</b>：样地页倒序排列（新样地在最上面），点击"+ 添加样地"新增（前一样地需填全面积/种植/成活，样地号自动递增无需手填），点 ✕ 删除单个样地</li>
+              <li><b>样地保存</b>：光标离开输入框自动保存，输入停顿1秒后也会自动保存，顶部实时显示保存状态（●未保存/⏳保存中/✓已保存/✗失败点保存重试）；保存失败多为网络不稳，会自动重试</li>
+              <li><b>样地坐标</b>：经纬度不可手填，点"📍坐标"按钮GPS自动获取后显示在卡片头</li>
+              <li><b>样地照片</b>：每个样地卡片有独立拍照按钮，可拍多张，仅保存到相册并记录文件名</li>
             </ul>
           </div>
           <div class="help-section">
@@ -2350,7 +2475,10 @@ async function scTrackFileUpload(input) {
 // 照片保存目录（默认值；App 内原生保存成功后以返回的真实路径为准）
 const PHOTO_SAVE_DIR = '/storage/emulated/0/Pictures/验收照片/';
 
-function buildPhotoName(sc, origName) {
+// 导出文件（Excel/轨迹ZIP）保存目录（默认值；App 内原生保存成功后以返回的真实路径为准）
+const EXPORT_SAVE_DIR = '/storage/emulated/0/Download/验收导出/';
+
+function buildPhotoName(sc, origName, sampleNo) {
   const clean = (v) => (v == null ? '' : String(v).trim()).replace(/[\\/:*?"<>|\s]+/g, '_');
   const parts = [
     clean(sc.category),
@@ -2358,6 +2486,8 @@ function buildPhotoName(sc, origName) {
     clean(sc.village),
     clean(sc.subcompartment_label || sc.subcompartment),
   ];
+  // 样地级照片：文件名带样地号（如 …_1-5小班_样地2_时间.jpg）
+  if (sampleNo != null && sampleNo !== '') parts.push(`样地${sampleNo}`);
   const d = new Date();
   const pad = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
@@ -2366,6 +2496,140 @@ function buildPhotoName(sc, origName) {
   const dot = origName ? origName.lastIndexOf('.') : -1;
   const ext = (dot >= 0) ? origName.slice(dot) : '';
   return name + ext;
+}
+
+// ── 照片水印：左下角 经纬度 + 备注（黑字白边，参考经典水印相机格式）──
+
+// 照片备注：分类 州市县乡村小班
+function buildPhotoRemark(sc) {
+  if (!sc) return '';
+  // 网格页小班行自带 prefilled；详情页 state.subcompartment 需回退 subcompartmentData.prefilled
+  const pf = sc.prefilled || (state.subcompartmentData && state.subcompartmentData.prefilled) || {};
+  const addr = [
+    pf.city != null ? String(pf.city) : '',
+    pf.county != null ? String(pf.county) : '',
+    sc.township != null ? String(sc.township) : (pf.township != null ? String(pf.township) : ''),
+    sc.village != null ? String(sc.village) : (pf.village != null ? String(pf.village) : ''),
+  ].join('');
+  const label = sc.subcompartment_label || sc.subcompartment || '';
+  return [sc.category, addr, label !== '' ? `${label}小班` : ''].filter(Boolean).join(' ').trim();
+}
+
+// 从 JPEG EXIF 读 GPS（相机实拍坐标）；无 EXIF / 解析失败 → null
+function readExifGps(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const dv = new DataView(reader.result);
+        if (dv.byteLength < 8 || dv.getUint16(0) !== 0xFFD8) return resolve(null);
+        let off = 2;
+        while (off + 4 < dv.byteLength) {
+          if (dv.getUint8(off) !== 0xFF) break;
+          const marker = dv.getUint8(off + 1);
+          if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { off += 2; continue; }
+          const size = dv.getUint16(off + 2);
+          // APP1 段且以 "Exif\0\0" 开头
+          if (marker === 0xE1 && off + 10 < dv.byteLength
+              && dv.getUint32(off + 4) === 0x45786966 && dv.getUint16(off + 8) === 0x0000) {
+            return resolve(_parseTiffGps(dv, off + 10));
+          }
+          if (marker === 0xDA) break; // SOS：图像数据开始，后面无 EXIF
+          off += 2 + size;
+        }
+      } catch (e) { /* 解析失败按无 GPS 处理 */ }
+      resolve(null);
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsArrayBuffer(file.slice(0, 256 * 1024)); // EXIF 位于文件头部
+  });
+}
+
+// 解析 TIFF 头 EXIF GPS IFD（返回 {lng, lat} 十进制度字符串）
+function _parseTiffGps(dv, base) {
+  const le = dv.getUint16(base) === 0x4949; // "II" 小端
+  const u16 = (o) => dv.getUint16(o, le);
+  const u32 = (o) => dv.getUint32(o, le);
+  const ifd0 = base + u32(base + 4);
+  let gpsOff = 0;
+  const n0 = u16(ifd0);
+  for (let i = 0; i < n0; i++) {
+    const e = ifd0 + 2 + i * 12;
+    if (u16(e) === 0x8825) { gpsOff = base + u32(e + 8); break; } // GPS IFD 指针
+  }
+  if (!gpsOff) return null;
+  const rat = (o) => { const d = u32(o + 4); return d ? u32(o) / d : 0; };
+  const valOff = (e, bytes) => (bytes <= 4 ? e + 8 : base + u32(e + 8)); // ≤4字节内联存储
+  let latRef = '', lat = null, lngRef = '', lng = null;
+  const ng = u16(gpsOff);
+  for (let i = 0; i < ng; i++) {
+    const e = gpsOff + 2 + i * 12;
+    const tag = u16(e);
+    if (tag === 1) latRef = String.fromCharCode(dv.getUint8(valOff(e, 2)));
+    else if (tag === 2) { const o = valOff(e, 24); lat = rat(o) + rat(o + 8) / 60 + rat(o + 16) / 3600; }
+    else if (tag === 3) lngRef = String.fromCharCode(dv.getUint8(valOff(e, 2)));
+    else if (tag === 4) { const o = valOff(e, 24); lng = rat(o) + rat(o + 8) / 60 + rat(o + 16) / 3600; }
+  }
+  if (lat == null || lng == null) return null;
+  if (latRef === 'S' && lat > 0) lat = -lat;
+  if (lngRef === 'W' && lng > 0) lng = -lng;
+  return { lng: lng.toFixed(6), lat: lat.toFixed(6) };
+}
+
+// 在照片左下角绘制水印（备注 + 经纬度 + 样地号，黑字白边，左对齐），返回 JPEG Blob
+async function stampPhotoMeta(file, remark, lng, lat, sampleNo) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+  catch (e) { bmp = await createImageBitmap(file); }
+  const canvas = document.createElement('canvas');
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bmp, 0, 0);
+  // 水印行（label 前缀，逐行换行）：日期 / 坐标 / 备注 / 样地号（样地级照片才有）
+  const d = new Date();
+  const p2 = n => String(n).padStart(2, '0');
+  const lines = [
+    `日期：${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`,
+    lng !== '' && lat !== '' ? `坐标：N ${lat}  E ${lng}` : '坐标：',
+    remark ? `备注：${remark}` : '备注：',
+  ];
+  if (sampleNo != null && sampleNo !== '') lines.push(`样地号：${sampleNo}`);
+  if (lines.length) {
+    const scale = Math.max(1, bmp.width / 1200);
+    const fs = Math.max(18, Math.round(26 * scale));
+    const pad = Math.round(16 * scale);
+    const lineH = Math.round(fs * 1.4);
+    ctx.font = `bold ${fs}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.lineJoin = 'round';
+    let y = canvas.height - pad - (lines.length - 1) * lineH;
+    lines.forEach(t => {
+      ctx.lineWidth = Math.max(2, Math.round(fs / 5));
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)'; // 白边
+      ctx.strokeText(t, pad, y);
+      ctx.fillStyle = 'rgba(20,20,20,0.9)';
+      ctx.fillText(t, pad, y);
+      y += lineH;
+    });
+  }
+  return await new Promise((res, rej) =>
+    canvas.toBlob(b => (b ? res(b) : rej(new Error('照片水印编码失败'))), 'image/jpeg', 0.92));
+}
+
+// 拍照统一处理：EXIF GPS 优先（回退当前定位）→ 绘水印（可含样地号）→ 存相册，返回 {name, lng, lat}
+async function stampAndSavePhoto(sc, file, lng, lat, sampleNo) {
+  const exif = await readExifGps(file);
+  if (exif && exif.lng && exif.lat) { lng = exif.lng; lat = exif.lat; }
+  let name = buildPhotoName(sc, file.name, sampleNo);
+  let out = file;
+  try {
+    out = await stampPhotoMeta(file, buildPhotoRemark(sc), lng, lat, sampleNo);
+    name = name.replace(/\.[^.]+$/, '') + '.jpg'; // 重编码为 JPEG
+  } catch (e) { /* 水印失败：按原图原扩展名保存 */ }
+  await savePhotoToAlbum(out, name);
+  return { name, lng, lat };
 }
 
 // 将拍照文件以「分类_乡镇_村_小班_时间」前缀名保存到安卓相册。
@@ -2422,11 +2686,10 @@ async function scPhotoFileChange(input) {
   }
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
   if (!state.scExtras.photos) state.scExtras.photos = [];
-  const name = buildPhotoName(state.subcompartment, file.name);
-  await savePhotoToAlbum(file, name);
+  const { name, lng: flng, lat: flat } = await stampAndSavePhoto(state.subcompartment, file, lng, lat);
   state.scExtras.photos.push({
     name,
-    lng, lat,
+    lng: flng, lat: flat,
     t: new Date().toISOString(),
     url: '',
   });
@@ -2435,7 +2698,7 @@ async function scPhotoFileChange(input) {
   _renderScPanel();
 }
 
-// 网格调查页「照片」按钮：直接调用安卓相机拍照（不弹面板），拍完按前缀命名保存
+// 网格调查页「照片」按钮：直接调用安卓相机拍照（不弹面板），拍完加水印按前缀命名保存
 async function gridScPhotoChange(input) {
   if (!state.gridSubcompartment || !input.files || !input.files[0]) { input.remove(); return; }
   const sc = state.gridSubcompartment;
@@ -2453,9 +2716,8 @@ async function gridScPhotoChange(input) {
   }
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
   if (!state.scExtras.photos) state.scExtras.photos = [];
-  const name = buildPhotoName(sc, file.name);
-  await savePhotoToAlbum(file, name);
-  state.scExtras.photos.push({ name, lng, lat, t: new Date().toISOString(), url: '' });
+  const { name, lng: flng, lat: flat } = await stampAndSavePhoto(sc, file, lng, lat);
+  state.scExtras.photos.push({ name, lng: flng, lat: flat, t: new Date().toISOString(), url: '' });
   await _scSavePhotos();
   toast('已保存到 ' + (state._photoSaveDir || PHOTO_SAVE_DIR), 2600);
   input.remove();
@@ -2467,6 +2729,370 @@ function scPhotoRemove(idx) {
   state.scExtras.photos.splice(idx, 1);
   _scSavePhotos();
   _renderScPanel();
+}
+
+// 样地级拍照：水印含样地号，文件名记入 sample.photos（仅相册文件名，不上传）
+async function samplePhotoFileChange(input) {
+  const sk = input.dataset.sampleKey;
+  const idx = Number(input.dataset.sampleIdx);
+  const file = input.files && input.files[0];
+  const arr = sk ? state.formData[sk] : null;
+  if (!file || !Array.isArray(arr) || !arr[idx] || !state.subcompartment) { input.value = ''; return; }
+  let lng = '', lat = '';
+  if (navigator.geolocation) {
+    try {
+      const pos = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+      });
+      lng = pos.coords.longitude.toFixed(6);
+      lat = pos.coords.latitude.toFixed(6);
+    } catch (e) { /* 定位失败仍可保存照片 */ }
+  }
+  const sampleNo = arr[idx].no || (idx + 1);
+  const { name } = await stampAndSavePhoto(state.subcompartment, file, lng, lat, sampleNo);
+  if (!Array.isArray(arr[idx].photos)) arr[idx].photos = [];
+  arr[idx].photos.push(name);
+  toast(`样地${sampleNo}照片已保存到 ` + (state._photoSaveDir || PHOTO_SAVE_DIR), 2600);
+  input.value = '';
+  renderContent();
+}
+
+// ══ 样地管理弹窗（网格工具栏「样地」按钮；小班 ↔ 样地 双向切换）══
+// 数据存 _gridSurveyMap[sc.id].samples（与网格保存同轨 PUT upsert）。
+// 样地号自动递增不手填；照片仅记相册文件名（水印含样地号），不参与统计运算。
+function smFieldDefs() {
+  const tdef = getGridTableDef(state.gridTable);
+  const f = tdef && (tdef.input_columns || []).find(x => x.type === 'sample_array');
+  return (f && f.sample_fields) || [];
+}
+
+function smSamples() {
+  const sc = state.gridSubcompartment;
+  if (!sc) return null;
+  const d = state._gridSurveyMap[sc.id] || (state._gridSurveyMap[sc.id] = {});
+  if (!Array.isArray(d.samples)) d.samples = [];
+  return d.samples;
+}
+
+// 进入样地管理页（独立视图，非弹窗）：工具栏「样地」按钮入口
+async function openSamplesPage() {
+  const sc = state.gridSubcompartment;
+  if (!sc) { toast('请先选择小班'); return; }
+  await loadGridSubcompartmentData();  // 确保最新数据
+  if (!smSamples()) return;
+  _smDirty = false;
+  state.view = 'samples';
+  renderApp();
+}
+
+// 样地管理页（页面级布局，卡片不压缩）
+function renderSamplesPage() {
+  const sc = state.gridSubcompartment;
+  if (!sc) {
+    state.view = 'survey_grid';
+    return renderSurveyGridPage();
+  }
+  return `<div class="page-samples">
+    <div class="samples-bar" id="samplesBar">${renderSamplesBarInner()}</div>
+    <div class="samples-list" id="samplesList">${renderSamplesListInner()}</div>
+  </div>`;
+}
+
+function bindSamplesPage() { /* 事件全部走全局委托 */ }
+
+// 顶部信息条：小班信息 + 添加按钮 + 统计 + 保存状态
+function renderSamplesBarInner() {
+  const sc = state.gridSubcompartment;
+  const samples = smSamples() || [];
+  const loc = [sc.township, sc.village].filter(Boolean).join(' ');
+  let planted = 0, alive = 0;
+  samples.forEach(s => { if (s) { planted += Number(s.planted) || 0; alive += Number(s.alive) || 0; } });
+  const rate = planted ? (alive / planted * 100).toFixed(2) + '%' : '--';
+  return `
+    <div class="samples-bar-info">
+      <b>小班 ${escapeHtml(sc.subcompartment_label || '')}</b>
+      ${loc ? `<small>${escapeHtml(loc)}</small>` : ''}
+      <span class="samples-stat">共 ${samples.length} 个样地 · 查数株数 ${planted} · 合格率 ${rate}</span>
+    </div>
+    <div class="samples-bar-actions">
+      <span class="sm-save-state ${_smDirty ? 'sm-unsaved' : 'sm-saved'}" id="smSaveState">${_smDirty ? '● 未保存' : '✓ 已保存'}</span>
+      <button class="btn-sample-add" data-action="sm-add">+ 添加样地</button>
+      <button class="btn-grid-action btn-primary" data-action="sm-save">保存</button>
+      <button class="btn-grid-action" data-action="sm-export" title="导出当前小班样地数据（Excel）">导出</button>
+    </div>`;
+}
+
+function updateSamplesStat() {
+  const bar = qs('#samplesBar');
+  if (bar && state.view === 'samples') bar.innerHTML = renderSamplesBarInner();
+}
+
+// 样地卡片渲染（倒序：最新样地显示在最上面；data-sm-idx 始终用原数组索引）
+// 经纬度（x/y）不可编辑：不渲染输入框，GPS 按钮获取后在卡片头只读显示
+// 删除按钮仅最后一个样地显示（防中间删除错位 + 防误触）
+function renderSamplesListInner() {
+  const samples = smSamples() || [];
+  const fieldDefs = smFieldDefs().filter(sf => !sf.auto && sf.key !== 'x' && sf.key !== 'y');
+  if (!samples.length) return '<div class="sample-empty">暂无样地，点击「+ 添加样地」开始录入</div>';
+  return samples.map((s, i) => ({ s, i })).reverse().map(({ s, i }) => {
+    const photos = Array.isArray(s.photos) ? s.photos.filter(Boolean) : [];
+    const coordTxt = (s.x && s.y) ? `${s.x}, ${s.y}` : '未定位';
+    const isLast = i === samples.length - 1;  // 数组最后一个（倒序显示在最底部）
+    const fieldsHtml = fieldDefs.map(sf => {
+      const v = s[sf.key] != null ? s[sf.key] : '';
+      return `<div class="field field-sm">
+        <label>${escapeHtml(sf.label)}</label>
+        <input type="number" step="any" inputmode="decimal" min="0" class="f-input" data-sm-idx="${i}" data-sm-field="${sf.key}" value="${escapeHtml(v)}">
+      </div>`;
+    }).join('');
+    return `<div class="sample-card">
+      <div class="sample-card-head">
+        <span class="sample-card-title">样地 ${s.no || i + 1}</span>
+        <span class="sample-coord" data-sm-coord="${i}">📍 ${escapeHtml(coordTxt)}</span>
+        <div class="sample-card-actions">
+          <button class="btn-gps" data-action="sm-gps" data-sm-idx="${i}" title="一键获取该样地坐标">📍坐标</button>
+          <label class="btn-photo" title="拍照（水印含样地号，照片不参与运算）">📷拍照${photos.length ? `(${photos.length})` : ''}
+            <input type="file" accept="image/*" capture="environment" class="f-sm-photo" data-sm-idx="${i}" hidden>
+          </label>
+          ${isLast ? `<button class="btn-sample-del" data-action="sm-del" data-sm-idx="${i}" title="删除最后一个样地（需先清空面积或种植株数）">✕</button>` : ''}
+        </div>
+      </div>
+      <div class="sample-card-body">${fieldsHtml}</div>
+      ${photos.length ? `<div class="sample-photo-names" title="${escapeHtml(photos.join('；'))}">📷 ${escapeHtml(photos.join('；'))}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// 新建样地前校验：已有样地必须填全 面积/种植/成活/坐标（GPS 获取），且种植 ≥ 成活
+function smValidateBeforeAdd() {
+  const samples = smSamples() || [];
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i] || {};
+    const miss = [];
+    if (s.area == null || s.area === '') miss.push('样地面积');
+    if (s.planted == null || s.planted === '') miss.push('种植株数');
+    if (s.alive == null || s.alive === '') miss.push('成活株数');
+    if (s.x == null || s.x === '' || s.y == null || s.y === '') miss.push('坐标（点📍获取）');
+    if (miss.length) {
+      toast(`样地${s.no || i + 1} 未填写：${miss.join('、')}，请补全后再添加新样地`, 3000);
+      // 聚焦第一个缺失的输入字段（坐标无输入框，跳过聚焦）
+      const focusMap = { '样地面积': 'area', '种植株数': 'planted', '成活株数': 'alive' };
+      const fk = focusMap[miss[0]];
+      if (fk) {
+        const el = qs(`[data-sm-field="${fk}"][data-sm-idx="${i}"]`);
+        if (el) { el.focus(); el.classList.add('input-error'); setTimeout(() => el.classList.remove('input-error'), 2000); }
+      }
+      return false;
+    }
+    // 种植株数必须 ≥ 成活株数
+    if (!smRowRuleOk(s)) {
+      toast(`样地${s.no || i + 1}：种植株数不能小于成活株数，请修正后再添加新样地`, 3000);
+      ['planted', 'alive'].forEach(k => {
+        const el = qs(`[data-sm-field="${k}"][data-sm-idx="${i}"]`);
+        if (el) el.classList.add('input-error');
+      });
+      const pe = qs(`[data-sm-field="planted"][data-sm-idx="${i}"]`);
+      if (pe) pe.focus();
+      return false;
+    }
+  }
+  return true;
+}
+
+// 保存时机：① 输入后 1.2s 自动落库 ② 光标离开输入框（blur）立即保存 ③ 手动保存按钮
+// 状态指示：● 未保存 / ⏳ 保存中… / ✓ 已保存 / ✗ 保存失败（自动重试）
+let _smDirty = false;
+let _smSaveTimer = null;
+let _smSaving = false;
+
+function smSetState(txt, cls) {
+  const st = qs('#smSaveState');
+  if (st) { st.textContent = txt; st.className = 'sm-save-state' + (cls ? ' ' + cls : ''); }
+}
+
+function smScheduleSave() {
+  _smDirty = true;
+  smSetState('● 未保存', 'sm-unsaved');
+  if (_smSaveTimer) clearTimeout(_smSaveTimer);
+  _smSaveTimer = setTimeout(() => {
+    _smSaveTimer = null;
+    if (_smDirty) smSave(false);
+  }, 1200);
+}
+
+// 光标离开输入框立即保存（切换到下一字段时即落库）
+function smSaveOnBlur() {
+  if (!_smDirty) return;
+  if (_smSaveTimer) { clearTimeout(_smSaveTimer); _smSaveTimer = null; }
+  smSave(false);
+}
+
+async function smSave(manual) {
+  if (_smSaving) return;  // 防并发重复提交
+  // 手动保存：强校验种植 ≥ 成活（自动保存不拦，避免输入中间态误报失败）
+  if (manual) {
+    const bad = smFirstRuleBad();
+    if (bad >= 0) {
+      const samples = smSamples() || [];
+      const s = samples[bad] || {};
+      toast(`样地${s.no || bad + 1}：种植株数不能小于成活株数，请修正后再保存`, 3000);
+      smMarkRowErrors();
+      const pe = qs(`[data-sm-field="planted"][data-sm-idx="${bad}"]`);
+      if (pe) pe.focus();
+      return;
+    }
+  }
+  _smSaving = true;
+  smSetState('⏳ 保存中…', 'sm-saving');
+  const ok = await saveSamplesNow(true, 2);  // 网络抖动自动重试 2 次
+  _smSaving = false;
+  if (ok) {
+    _smDirty = false;
+    smSetState('✓ 已保存', 'sm-saved');
+    toast(manual ? '样地数据已保存' : '样地数据已自动保存');
+  } else {
+    smSetState('✗ 保存失败 点击保存重试', 'sm-failed');
+  }
+}
+
+async function saveSamplesNow(silent, retries) {
+  const sc = state.gridSubcompartment;
+  if (!sc || !state.project) return false;
+  const d = state._gridSurveyMap[sc.id] || {};
+  // 重算 computed 统计字段（与网格保存同口径）
+  const tdef = getGridTableDef(state.gridTable);
+  ((tdef && tdef.input_columns) || []).forEach(f => {
+    if (f.type === 'computed') d[f.key] = computeFieldValue(f.formula, d);
+  });
+  d.inspector = d.inspector || state.user || '';
+  const url = `api/projects/${state.project.id}/survey/${state.gridTable}/rows`;
+  const opts = {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subcompartment_id: sc.id, data: d, inspector: d.inspector }),
+  };
+  // 走统一封装（401 跳登录）；Failed to fetch（弱网/断网）自动重试
+  const tries = (retries || 0) + 1;
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await apiFetch(url, opts);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return true;
+    } catch (e) {
+      lastErr = e;
+      if (String(e.message || '').includes('未登录')) return false;  // 跳登录场景不再重试
+      if (i < tries - 1) await new Promise(res => setTimeout(res, 1200));
+    }
+  }
+  if (!silent) toast('保存失败：' + (lastErr ? lastErr.message : '未知错误') + '（请检查网络后重试）', 3000);
+  return false;
+}
+
+// 返回小班前兜底保存未落库的输入
+async function smLeaveToGrid() {
+  if (_smSaveTimer) { clearTimeout(_smSaveTimer); _smSaveTimer = null; }
+  if (_smDirty) await smSave(false);
+  state.view = 'survey_grid';
+  renderApp();
+  await renderSurveyForm();  // 刷新网格统计显示
+}
+
+// ── 样地行规则校验：种植株数 ≥ 成活株数（两者都有值时才判） ──
+function smRowRuleOk(s) {
+  if (!s) return true;
+  const p = (s.planted == null || s.planted === '') ? null : Number(s.planted);
+  const a = (s.alive == null || s.alive === '') ? null : Number(s.alive);
+  if (p != null && !isNaN(p) && a != null && !isNaN(a) && p < a) return false;
+  return true;
+}
+
+// 找到第一个违反「种植 ≥ 成活」的样地（返回索引，无则 -1）
+function smFirstRuleBad() {
+  const samples = smSamples() || [];
+  for (let i = 0; i < samples.length; i++) {
+    if (!smRowRuleOk(samples[i])) return i;
+  }
+  return -1;
+}
+
+// 红框标记所有违反规则的样地输入框（输入时实时刷新）
+function smMarkRowErrors() {
+  const samples = smSamples() || [];
+  samples.forEach((s, i) => {
+    const bad = !smRowRuleOk(s);
+    ['planted', 'alive'].forEach(k => {
+      const el = qs(`[data-sm-field="${k}"][data-sm-idx="${i}"]`);
+      if (el) el.classList.toggle('input-error', bad);
+    });
+  });
+}
+
+// 样地页导出：仅导出当前小班（当前分类，sheet 名「分类-调查小班号」）
+async function exportSamples() {
+  if (!state.project) { toast('请先选择项目'); return; }
+  const sc = state.gridSubcompartment;
+  if (!sc) { toast('请先选择小班'); return; }
+  toast('正在导出样地数据…', 1500);
+  try {
+    const res = await fetch(`api/projects/${state.project.id}/export_samples?sc=${sc.id}`);
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || `导出失败 (${res.status})`);
+    }
+    const blob = await res.blob();
+    const filename = `${state.project.name}_${sc.category || ''}_${sc.subcompartment || sc.subcompartment_label || ''}_样地.xlsx`;
+    const nativeSaved = await downloadExportFile(blob, filename);
+    if (!nativeSaved) toast('当前小班样地数据已导出');
+  } catch (e) {
+    toast('样地导出失败：' + e.message, 2500);
+  }
+}
+
+function smGetGPS(idx) {
+  if (!navigator.geolocation) { toast('设备不支持定位'); return; }
+  toast('正在获取定位…', 1500);
+  navigator.geolocation.getCurrentPosition(pos => {
+    const samples = smSamples();
+    if (!samples || !samples[idx]) { toast('定位成功但样地已失效，请重试'); return; }
+    samples[idx].x = pos.coords.longitude.toFixed(6);
+    samples[idx].y = pos.coords.latitude.toFixed(6);
+    // 只读坐标显示更新（无输入框）
+    const el = qs(`[data-sm-coord="${idx}"]`);
+    if (el) el.textContent = `📍 ${samples[idx].x}, ${samples[idx].y}`;
+    toast('定位成功');
+    smScheduleSave();
+  }, handleGeoError, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+}
+
+// 样地页拍照：优先用该样地已有坐标，回退当前定位；拍完即时落库并显示累计张数
+async function smPhotoFileChange(input) {
+  const idx = Number(input.dataset.smIdx);
+  const file = input.files && input.files[0];
+  const samples = smSamples();
+  const sc = state.gridSubcompartment;  // grid 流程：小班对象来自 gridSubcompartment
+  if (!file || !samples || !samples[idx] || !sc) { input.value = ''; return; }
+  let lng = samples[idx].x || '', lat = samples[idx].y || '';
+  if ((!lng || !lat) && navigator.geolocation) {
+    try {
+      const pos = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+      });
+      lng = pos.coords.longitude.toFixed(6);
+      lat = pos.coords.latitude.toFixed(6);
+    } catch (e) { /* 定位失败仍可保存照片 */ }
+  }
+  const sampleNo = samples[idx].no || (idx + 1);
+  const { name } = await stampAndSavePhoto(sc, file, lng, lat, sampleNo);
+  if (!Array.isArray(samples[idx].photos)) samples[idx].photos = [];
+  samples[idx].photos.push(name);
+  await saveSamplesNow(true, 1);  // 照片记录即时落库，防丢失
+  toast(`样地${sampleNo}已拍 ${samples[idx].photos.length} 张，保存在 ` + (state._photoSaveDir || PHOTO_SAVE_DIR), 2600);
+  input.value = '';
+  updateSamplesStat();
+  // 仅更新该卡片拍照按钮张数，避免重渲染打断其他输入
+  const btn = input.closest('.btn-photo');
+  if (btn) btn.firstChild.textContent = `📷拍照${samples[idx].photos.length ? `(${samples[idx].photos.length})` : ''}`;
 }
 
 async function _scSavePhotos() {
@@ -2541,7 +3167,9 @@ app.addEventListener('click', async (e) => {
       const fdef = def && (def.input_columns || []).find(x => x.key === sk);
       if (!fdef) break;
       if (!Array.isArray(state.formData[sk])) state.formData[sk] = [];
-      state.formData[sk].push(newSampleObject(fdef.sample_fields || []));
+      const obj = newSampleObject(fdef.sample_fields || []);
+      obj.no = state.formData[sk].length + 1;  // 样地号自动递增
+      state.formData[sk].push(obj);
       renderContent();
       break;
     }
@@ -2550,15 +3178,85 @@ app.addEventListener('click', async (e) => {
       const idx = Number(t.dataset.sampleIdx);
       if (Array.isArray(state.formData[sk])) {
         state.formData[sk].splice(idx, 1);
+        // 重排序号，保持连续
+        state.formData[sk].forEach((s, i) => { if (s && typeof s === 'object') s.no = i + 1; });
         renderContent();
       }
       break;
     }
+    // ── 样地管理页 ──
+    case 'sc-samples':
+      await openSamplesPage();
+      break;
+    case 'go-grid':
+      await smLeaveToGrid();
+      break;
+    case 'sm-add': {
+      const samples = smSamples();
+      if (!samples) break;
+      // 新建前校验：前面样地数据必须完整（面积/种植/成活）
+      if (!smValidateBeforeAdd()) break;
+      // 兜底保存未落库的输入
+      if (_smSaveTimer) { clearTimeout(_smSaveTimer); _smSaveTimer = null; }
+      if (_smDirty) await saveSamplesNow(true, 1);
+      const obj = newSampleObject(smFieldDefs());
+      obj.no = samples.length + 1;  // 样地号自动递增，不手填
+      samples.push(obj);
+      // 仅重渲染列表与信息条（倒序：新样地在最顶部）
+      const list = qs('#samplesList');
+      if (list) list.innerHTML = renderSamplesListInner();
+      updateSamplesStat();
+      await saveSamplesNow(true, 1);
+      // 聚焦新样地（列表第一个卡片）的面积输入
+      const firstCard = qs('.sample-card');
+      if (firstCard) {
+        const firstInput = firstCard.querySelector('[data-sm-field="area"]');
+        if (firstInput) setTimeout(() => firstInput.focus(), 150);
+      }
+      break;
+    }
+    case 'sm-del': {
+      const samples = smSamples();
+      if (!samples) break;
+      const idx = Number(t.dataset.smIdx);
+      // 仅最后一个样地可删（防中间删除导致样地号/数据错位）
+      if (idx !== samples.length - 1) { toast('只能删除最后一个样地', 2200); break; }
+      // 防误触：最后一个样地数据完整（面积和种植都有值）时不可删，
+      // 需先把面积或种植株数清空/置 0 才能删除
+      const s = samples[idx] || {};
+      const area = Number(s.area) || 0;
+      const planted = Number(s.planted) || 0;
+      if (area > 0 && planted > 0) {
+        toast('为防误删：请先将该样地的面积或种植株数清空（或置 0），再点删除', 3000);
+        break;
+      }
+      samples.pop();
+      samples.forEach((x, i) => { if (x && typeof x === 'object') x.no = i + 1; });
+      const list = qs('#samplesList');
+      if (list) list.innerHTML = renderSamplesListInner();
+      updateSamplesStat();
+      await saveSamplesNow(true, 1);
+      break;
+    }
+    case 'sm-gps':
+      smGetGPS(Number(t.dataset.smIdx));
+      break;
+    case 'sm-save':
+      if (_smSaveTimer) { clearTimeout(_smSaveTimer); _smSaveTimer = null; }
+      await smSave(true);
+      updateSamplesStat();
+      break;
+    case 'sm-export':
+      // 导出前兜底保存未落库的输入，确保导出数据最新
+      if (_smSaveTimer) { clearTimeout(_smSaveTimer); _smSaveTimer = null; }
+      if (_smDirty) await smSave(false);
+      await exportSamples();
+      break;
     case 'save-survey':
       await saveSurvey();
       break;
-    case 'export':
-      exportData();
+    case 'export-base':
+      await exportBase();
       break;
     case 'export-tracks':
       await exportTracks();
@@ -2691,7 +3389,7 @@ app.addEventListener('input', (e) => {
     onScSearchInput(t.value);
     return;
   }
-  // 样方字段输入：data-sample-field 定位
+  // 样地字段输入：data-sample-field 定位；同时刷新样地统计（computed）
   if (t.dataset && t.dataset.sampleField) {
     const sk = t.dataset.sampleKey;
     const idx = Number(t.dataset.sampleIdx);
@@ -2699,6 +3397,27 @@ app.addEventListener('input', (e) => {
     const arr = state.formData[sk];
     if (Array.isArray(arr) && arr[idx]) {
       arr[idx][fk] = t.value;
+      refreshComputedDisplays();
+    }
+    return;
+  }
+  // 样地页字段输入：data-sm-field 定位；负数硬拦截 + 规则红框 + 实时统计 + debounce 自动保存
+  if (t.dataset && t.dataset.smField !== undefined && t.dataset.smIdx !== undefined) {
+    const samples = smSamples();
+    const idx = Number(t.dataset.smIdx);
+    if (samples && samples[idx]) {
+      let v = t.value;
+      // 不能为负数：即时去掉负号（min=0 已挡步进器，这里挡手动键入）
+      if (v !== '' && Number(v) < 0) {
+        v = String(v).replace(/-/g, '');
+        t.value = v;
+        toast('填写数据不能为负数', 1800);
+      }
+      samples[idx][t.dataset.smField] = v;
+      // 种植 ≥ 成活：红框实时标记（强拦截在 添加样地/手动保存 时）
+      smMarkRowErrors();
+      updateSamplesStat();
+      smScheduleSave();
     }
     return;
   }
@@ -2736,6 +3455,21 @@ async function switchGridProject(pid) {
 }
 
 // change 事件
+// 光标离开样地输入框（切换到下一字段）：违反「种植 ≥ 成活」即时提示 + 立即保存
+app.addEventListener('focusout', (e) => {
+  const t = e.target;
+  if (t && t.dataset && t.dataset.smField !== undefined && t.dataset.smIdx !== undefined) {
+    const samples = smSamples();
+    const idx = Number(t.dataset.smIdx);
+    if (samples && samples[idx] && !smRowRuleOk(samples[idx])) {
+      const s = samples[idx];
+      toast(`样地${s.no || idx + 1}：种植株数不能小于成活株数`, 2500);
+      t.classList.add('input-error');
+    }
+    smSaveOnBlur();
+  }
+});
+
 app.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.classList && t.classList.contains('f-photo')) {
@@ -2746,6 +3480,14 @@ app.addEventListener('change', async (e) => {
       const nameEl = qs(`[data-photo-name="${field}"]`);
       if (nameEl) nameEl.textContent = file.name;
     }
+    return;
+  }
+  if (t.classList && t.classList.contains('f-sample-photo')) {
+    samplePhotoFileChange(t);
+    return;
+  }
+  if (t.classList && t.classList.contains('f-sm-photo')) {
+    smPhotoFileChange(t);
     return;
   }
   if (t.id === 'scPhotoFile') {

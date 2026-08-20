@@ -573,6 +573,61 @@ input, select, textarea, button {
   display: flex; align-items: center; justify-content: center;
 }
 .btn-sample-del:active { background: rgba(255,255,255,.5); }
+.sample-card-actions { display: flex; align-items: center; gap: 6px; }
+.sample-card-actions .btn-gps, .sample-card-actions .btn-photo {
+  height: 26px; padding: 0 8px; border-radius: 6px; font-size: 12px;
+}
+.sample-photo-names {
+  padding: 6px 8px;
+  font-size: 12px; color: var(--text-2);
+  border-top: 1px dashed var(--border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── 样地管理页（独立视图，工具栏「样地」入口）── */
+.page-samples {
+  display: flex; flex-direction: column;
+  flex: 1 1 auto; min-height: 0;
+}
+.samples-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg, #fff);
+  flex-shrink: 0;
+}
+.samples-bar-info { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.samples-bar-info b { font-size: 15px; }
+.samples-bar-info small { color: var(--text-2); font-size: 12px; }
+.samples-stat { font-size: 12px; color: var(--text-2); }
+.samples-bar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.sm-save-state { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.samples-list {
+  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 10px 12px 24px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.samples-list .sample-card-body {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px; padding: 8px;
+}
+.field-sm { min-width: 0; }
+.field-sm .f-input { width: 100%; box-sizing: border-box; min-height: 38px; }
+.input-error { border-color: #e53935 !important; box-shadow: 0 0 0 2px rgba(229, 57, 53, .15); }
+/* 卡片头：标题 + 只读坐标 + 按钮组（允许换行不挤压） */
+.samples-list .sample-card-head {
+  flex-wrap: wrap; gap: 4px 8px;
+}
+.sample-coord {
+  font-size: 12px; font-weight: 400;
+  opacity: .95; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 保存状态色 */
+.sm-save-state.sm-unsaved { color: #e65100; }
+.sm-save-state.sm-saving { color: #1565c0; }
+.sm-save-state.sm-saved { color: #2e7d32; }
+.sm-save-state.sm-failed { color: #c62828; font-weight: 700; }
 
 /* 添加按钮 */
 .btn-add {
@@ -1162,6 +1217,18 @@ input, select, textarea, button {
   cursor: pointer;
   line-height: 1;
 }
+.sc-photo-save-path {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--green-l);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.sc-photo-save-path.empty { background: var(--panel-2); color: var(--text-2); }
 
 @media (prefers-color-scheme: dark) {
   .badge-admin { color: #f0c84e; }

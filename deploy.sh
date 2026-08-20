@@ -4,9 +4,11 @@ set -euo pipefail
 REMOTE=${REMOTE:-www@forest.bibook.top}
 DEST=${DEST:-/home/www/bibook_deploy/apps/survey}
 GATEWAY_APPS_ROOT=${GATEWAY_APPS_ROOT:-/home/www/bibook_deploy/apps/gateway/apps_root}
-EXCLUDE="--exclude=__pycache__/ --exclude=*.pyc --exclude=*.db --exclude=*.db-wal --exclude=*.db-shm --exclude=.DS_Store"
+EXCLUDE="--exclude=__pycache__/ --exclude=*.pyc --exclude=*.db --exclude=*.db-wal --exclude=*.db-shm --exclude=*.bak* --exclude=.DS_Store"
 # 同步 survey/ 到服务器
 rsync -avz $EXCLUDE ./survey/ "$REMOTE:$DEST/survey/"
+# 同步项目根 tpl/（exporter 引用的官方模板 tpl-base/tpl-样地，缺它导出 500）
+rsync -avz $EXCLUDE ./tpl/ "$REMOTE:$DEST/tpl/"
 # 同步 appspec 到 gateway apps_root（实际 gateway 在 apps/gateway/）
 scp ./survey/gateway/survey.appspec "$REMOTE:$GATEWAY_APPS_ROOT/survey.appspec"
 scp ./survey/gateway/admin.appspec "$REMOTE:$GATEWAY_APPS_ROOT/admin.appspec"

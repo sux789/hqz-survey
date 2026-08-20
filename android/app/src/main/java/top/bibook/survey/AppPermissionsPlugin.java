@@ -30,6 +30,7 @@ import java.io.OutputStream;
  *   - request({type})       申请定位/相机权限
  *   - openSettings()        打开本 App 的系统权限设置页
  *   - savePhoto({base64,name})  照片写入系统相册 Pictures/验收照片/，返回真实绝对路径
+ *   - saveFile({base64,name})   导出文件（xlsx/zip）写入公共下载 Download/验收导出/，返回真实绝对路径
  * type: 'location' | 'camera'
  */
 @CapacitorPlugin(
@@ -156,10 +157,82 @@ public class AppPermissionsPlugin extends Plugin {
 
     /** 查询 MediaStore 记录的真实文件路径，失败时按约定目录构造。 */
     private String queryRealPath(Uri uri) {
+        return queryFileRealPath(uri, new File(new File(
+                Environment.getExternalStorageDirectory(),
+                Environment.DIRECTORY_PICTURES), "验收照片"));
+    }
+
+    /**
+     * 导出文件（xlsx/zip）写入公共下载目录 Download/验收导出/，返回真实绝对路径。
+     * Android 10+ 走 MediaStore Downloads（自有文件免存储权限，文件管理器立即可见）；
+     * 旧版本回退应用外部私有目录。
+     */
+    @PluginMethod
+    public void saveFile(PluginCall call) {
+        String base64 = call.getString("base64");
+        String name = call.getString("name", "export.bin");
+        if (base64 == null || base64.isEmpty()) {
+            call.reject("缺少文件数据");
+            return;
+        }
+        String lower = name.toLowerCase();
+        String mime;
+        if (lower.endsWith(".xlsx")) {
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        } else if (lower.endsWith(".zip")) {
+            mime = "application/zip";
+        } else {
+            mime = "application/octet-stream";
+        }
+        try {
+            byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
+            Uri uri;
+            String realPath;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                values.put(MediaStore.Downloads.MIME_TYPE, mime);
+                values.put(MediaStore.Downloads.RELATIVE_PATH,
+                        Environment.DIRECTORY_DOWNLOADS + "/验收导出");
+                uri = getContext().getContentResolver().insert(
+                        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+                if (uri == null) {
+                    call.reject("创建下载记录失败");
+                    return;
+                }
+                try (OutputStream os = getContext().getContentResolver().openOutputStream(uri)) {
+                    os.write(bytes);
+                    os.flush();
+                }
+                realPath = queryFileRealPath(uri, new File(new File(
+                        Environment.getExternalStorageDirectory(),
+                        Environment.DIRECTORY_DOWNLOADS), "验收导出"));
+            } else {
+                File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "验收导出");
+                if (!dir.exists()) dir.mkdirs();
+                File f = new File(dir, name);
+                try (FileOutputStream fos = new FileOutputStream(f)) {
+                    fos.write(bytes);
+                    fos.flush();
+                }
+                uri = Uri.fromFile(f);
+                realPath = f.getAbsolutePath();
+            }
+            JSObject ret = new JSObject();
+            ret.put("path", realPath);
+            ret.put("uri", uri.toString());
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("保存文件失败: " + e.getMessage(), e);
+        }
+    }
+
+    /** 查询 MediaStore 记录的真实文件路径（DATA 列），失败时返回 fallbackDir。 */
+    private String queryFileRealPath(Uri uri, File fallbackDir) {
         try (Cursor c = getContext().getContentResolver().query(
-                uri, new String[]{MediaStore.Images.Media.DATA}, null, null, null)) {
+                uri, new String[]{MediaStore.MediaColumns.DATA}, null, null, null)) {
             if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(MediaStore.Images.Media.DATA);
+                int idx = c.getColumnIndex(MediaStore.MediaColumns.DATA);
                 if (idx >= 0) {
                     String p = c.getString(idx);
                     if (p != null && !p.isEmpty()) return p;
@@ -167,7 +240,6 @@ public class AppPermissionsPlugin extends Plugin {
             }
         } catch (Exception ignored) {
         }
-        return new File(new File(Environment.getExternalStorageDirectory(),
-                Environment.DIRECTORY_PICTURES), "验收照片").getAbsolutePath();
+        return fallbackDir.getAbsolutePath();
     }
 }

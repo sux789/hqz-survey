@@ -171,7 +171,7 @@ async function loadGdbTab() {
       </div>
       <div id="gdbUploadResult"></div>
       <div class="upload-hint">
-        ⚠ 上传 .zip 格式的 GDB 文件包。<b>项目名自动从 GDB 图层属性读取</b>，无需手动输入。系统按图层名分类（人工造林/封山育林/退化林修复/水利水保/草原），非分类图层不读取。
+        ⚠ 上传 .zip 格式的 GDB 文件包。<b>项目名自动从 GDB 图层属性读取</b>，无需手动输入。系统按图层名分类（人工造林/封山育林/退化林修复），非分类图层不读取。
       </div>
     </div>
     <div id="gdbListWrap"></div>
@@ -485,7 +485,9 @@ function renderProjectsTable() {
       <td>${escapeHtml(date)}</td>
       <td class="admin-actions-cell">
         <button class="btn-admin-action" data-action="proj-view-members" data-pid="${p.id}">成员</button>
-        <button class="btn-admin-action" data-action="proj-export" data-pid="${p.id}">导出</button>
+        <button class="btn-admin-action" data-action="proj-export-base" data-pid="${p.id}">基本信息</button>
+        <button class="btn-admin-action" data-action="proj-export-samples" data-pid="${p.id}">样地</button>
+        <button class="btn-admin-action" data-action="proj-export-tracks" data-pid="${p.id}">轨迹GPX</button>
         <button class="btn-admin-action warn" data-action="proj-delete" data-pid="${p.id}" data-name="${escapeHtml(p.name)}">删除</button>
       </td>
     </tr>`;
@@ -555,8 +557,16 @@ async function deleteProject(pid, name) {
   }
 }
 
-function exportProject(pid) {
-  window.open(`api/projects/${pid}/export`, '_blank');
+function exportBase(pid) {
+  window.open(`api/projects/${pid}/export_base`, '_blank');
+}
+
+function exportSamples(pid) {
+  window.open(`api/projects/${pid}/export_samples`, '_blank');
+}
+
+function exportTracks(pid) {
+  window.open(`api/projects/${pid}/export_tracks`, '_blank');
 }
 
 async function viewMembers(pid) {
@@ -844,8 +854,14 @@ app.addEventListener('click', async (e) => {
       await resetPassword(t.dataset.uid);
       break;
     // Projects
-    case 'proj-export':
-      exportProject(t.dataset.pid);
+    case 'proj-export-base':
+      exportBase(t.dataset.pid);
+      break;
+    case 'proj-export-samples':
+      exportSamples(t.dataset.pid);
+      break;
+    case 'proj-export-tracks':
+      exportTracks(t.dataset.pid);
       break;
     case 'proj-delete':
       await deleteProject(t.dataset.pid, t.dataset.name);

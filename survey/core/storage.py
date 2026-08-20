@@ -1054,7 +1054,7 @@ def list_project_subcompartment_rows(pid, project_name=None, category=None):
         if category:
             sql += " AND sr.category = ?"
             params.append(category)
-        sql += " ORDER BY sr.township, sr.forest_compartment, sr.subcompartment"
+        sql += " ORDER BY sr.forest_compartment, sr.subcompartment"
         rows = conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
@@ -1247,6 +1247,12 @@ def import_gdb_subcompartments(gid, project_id, gdb_path, layer=None, layer_meta
                     if f_for:
                         props["林班"] = forest_compartment
                     if f_sub:
+                        # 小班号取调查小班号（别名优先级）时，保留 GDB 原「小班」值
+                        # 供导出 G 列使用（调查小班号 ≠ 小班，两者都要展示）
+                        if f_sub != "小班":
+                            orig = str(props.get("小班", "") or "").strip()
+                            if orig and orig not in ("None", "nan"):
+                                props["小班原始"] = orig
                         props["小班"] = subcompartment
 
                     # 提取定位字段

@@ -104,7 +104,7 @@ def api_gdb_upload():
 
     流程：
       1. 解压 → 一二层目录找 .gdb
-      2. 扫描分类图层（人工造林/封山育林/退化林修复/水利水保/草原）
+      2. 扫描分类图层（人工造林/封山育林/退化林修复）
       3. 从分类图层属性读项目名
       4. 校验：无分类图层/无项目名/项目名不一致/项目已上传
       5. 自动创建项目 + 按分类导入小班
@@ -159,7 +159,7 @@ def api_gdb_upload():
         if not classified:
             GDB.delete_gdb_files(gid)
             return jsonify({
-                "error": "未找到分类图层（人工造林/封山育林/退化林修复/水利水保/草原）",
+                "error": "未找到分类图层（人工造林/封山育林/退化林修复）",
                 "skipped_layers": skipped_layers,
             }), 400
 
@@ -590,21 +590,68 @@ def api_prefilled(pid, table_id):
 
 # ── 导出 ──
 
-@app.route("/api/projects/<pid>/export")
+@app.route("/api/projects/<pid>/export_base")
 @_admin_required
-def api_export(pid):
+def api_export_base(pid):
+    """导出基本信息 xlsx（tpl-base 模板，一项目一文件，3 分类 sheet）。"""
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
     try:
-        output, stats = exporter.export_project(pid)
-        filename = f"{proj['name']}_验收数据.xlsx"
+        output, stats = exporter.export_base(pid)
+        filename = f"{proj['name']}_基本信息.xlsx"
         return send_file(
             output,
             as_attachment=True,
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"导出失败: {e}"}), 500
+
+
+@app.route("/api/projects/<pid>/export_samples")
+@_admin_required
+def api_export_samples(pid):
+    """导出样地 xlsx（tpl-样地 模板，每分类一个 sheet，块结构）。"""
+    proj = storage.get_project(pid)
+    if not proj:
+        return jsonify({"error": "项目不存在"}), 404
+    try:
+        output, stats = exporter.export_samples(pid)
+        filename = f"{proj['name']}_样地.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"导出失败: {e}"}), 500
+
+
+@app.route("/api/projects/<pid>/export_tracks")
+@_admin_required
+def api_export_tracks(pid):
+    """导出项目全部轨迹为 GPX zip（ArcGIS 可直接识别）。"""
+    proj = storage.get_project(pid)
+    if not proj:
+        return jsonify({"error": "项目不存在"}), 404
+    try:
+        output, stats = exporter.export_tracks_zip(pid)
+        filename = f"{proj['name']}_轨迹GPX.zip"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/zip",
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         import traceback
         traceback.print_exc()
