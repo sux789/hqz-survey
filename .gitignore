@@ -31,6 +31,9 @@ venv/
 .pytest_cache/
 .workbuddy/
 
+# Excel/WPS 打开模板时的锁文件
+.~*
+
 # 导出基线快照（真实项目数据，tools/make_baseline.sh 生成）
 baseline/
 
