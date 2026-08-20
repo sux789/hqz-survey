@@ -26,6 +26,13 @@ T1  导出模板         tpl/                          tpl-base.xlsx（基本信
 T2  硬约束注册表     CONSTRAINTS.md                改动红线（架构/数据模型/口径/导出/部署）
 T3  协作协议         AGENTS.md                     改动前必读、改动后全绿流程
 
+# ═══ 测试/工具 ═══
+X1  单元测试         tests/                        test_schema / test_exporter / test_gdb
+X2  GDB结构探测      tools/verify_gdb.py           图层/字段别名/CRS 检查（改 GDB 前先跑）
+X3  模板结构探测     tools/inspect_tpl.py          sheet/合并区/表头行（改模板前先跑）
+X4  勾稽断言         tools/check_invariants.py     导出业务不变量 I1-I6（对应 CONSTRAINTS 编号）
+X5  基线/对比        tools/make_baseline.sh + tools/compare_export.py   导出口径双跑防线
+
 # ═══ 数据流（业务→代码映射）═══
 # GDB上传 → A1 → C4(解析) → C2(存gdb_files) → C4(生成GeoJSON)
 # 用户调查 → U1 → C2(读小班) → U2(地图渲染) → C2(存records) → C3(导出xlsx)
