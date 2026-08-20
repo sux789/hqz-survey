@@ -217,6 +217,31 @@ class TestExportBase:
         assert ws.cell(row=5, column=48).value == 102.123456   # AV 打卡坐标x
         assert ws.cell(row=5, column=49).value == 25.654321    # AW 打卡坐标y
 
+    def test_mgmt_enum_defaults_exported(self, sample_data):
+        """管理情况 5 项（Z-AD）空值导出 schema 默认「有」；AR/AU 手写签字留空。"""
+        output, _ = exporter.export_base(sample_data["pid"])
+        wb = openpyxl.load_workbook(output)
+        ws = wb["2023年度人工造林"]
+        # sc1 未录入任何管理情况字段 → 全部默认「有」
+        for col in range(26, 31):  # Z=26 ... AD=30
+            assert ws.cell(row=5, column=col).value == "有", f"col {col}"
+        # AR/AU 手写签字不录入 → 留空
+        assert ws.cell(row=5, column=44).value in (None, "")  # AR
+        assert ws.cell(row=5, column=47).value in (None, "")  # AU
+
+    def test_mgmt_enum_saved_value_wins(self, sample_data):
+        """已录入值优先于默认：mgmt_design=「无」导出「无」。"""
+        pid = sample_data["pid"]
+        # sc2=小班3 → 排序后行5
+        storage.upsert_survey_row(pid, "table1", sample_data["sc2"], {
+            "mgmt_design": "无", "mgmt_meeting": "有",
+        }, "张三")
+        output, _ = exporter.export_base(pid)
+        wb = openpyxl.load_workbook(output)
+        ws = wb["2023年度人工造林"]
+        assert ws.cell(row=5, column=26).value == "无"   # Z 作业设计
+        assert ws.cell(row=5, column=27).value == "有"   # AA 会议纪要
+
 
 class TestExportSamples:
     def test_returns_bytesio(self, sample_data):

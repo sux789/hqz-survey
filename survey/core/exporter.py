@@ -375,15 +375,18 @@ def _resolve_cell(key, source, prefilled, input_data, extras, stats, sc_row, fie
                 return v
         val = input_data.get(key, '')
         f = field_types.get(key)
-        if f and val not in ('', None):
+        if f:
             t = f.get('type')
             if t == 'enum':
+                # 空值取默认：管理情况 5 项默认「有」——前端不保存未触碰的
+                # 默认值，库里缺 key，导出时按 schema 默认补齐
                 return _norm_enum(val, f)
-            if t in ('number', 'percent'):
-                return _fmt_num(val)
-            if t == 'photo':
-                if isinstance(val, list):
-                    return ';'.join(str(x) for x in val if x)
+            if val not in ('', None):
+                if t in ('number', 'percent'):
+                    return _fmt_num(val)
+                if t == 'photo':
+                    if isinstance(val, list):
+                        return ';'.join(str(x) for x in val if x)
         return val
     if source == 'sample_stat':
         return stats.get(key)
