@@ -15,6 +15,32 @@ import openpyxl
 from survey.core import storage, exporter, schema as S
 
 
+class TestTemplateFormulas:
+    """模板公式质量门禁（tpl-base 示例行 / tpl-samples 全表）。"""
+
+    @pytest.mark.parametrize("tpl_path", [
+        exporter._BASE_TEMPLATE, exporter._SAMPLE_TEMPLATE,
+    ], ids=["tpl-base", "tpl-samples"])
+    def test_no_circular_reference(self, tpl_path):
+        """公式不得引用自身单元格（Excel 打开会提示循环引用）。
+
+        2026-08-21 模板曾出现 =IF(AP5>=0.9,N5,AF5)（AF 列引用自身，
+        本意"不合格时保留手填值"），已统一改为 =IF(cond,N5,"")。
+        """
+        import re
+        wb = openpyxl.load_workbook(tpl_path)
+        for sn in wb.sheetnames:
+            ws = wb[sn]
+            for row in ws.iter_rows():
+                for c in row:
+                    v = c.value
+                    if isinstance(v, str) and v.startswith("="):
+                        pat = rf"(?<![A-Z$]){re.escape(c.coordinate)}(?!\d)"
+                        assert not re.search(pat, v), \
+                            f"{tpl_path.name}[{sn}]!{c.coordinate} 公式自引用: {v}"
+        wb.close()
+
+
 @pytest.fixture(autouse=True)
 def setup_db(tmp_path, monkeypatch):
     """每个测试用独立临时数据库（避免污染开发库 survey.db）。"""
