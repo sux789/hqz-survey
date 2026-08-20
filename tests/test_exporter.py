@@ -242,6 +242,47 @@ class TestExportBase:
         assert ws.cell(row=5, column=26).value == "无"   # Z 作业设计
         assert ws.cell(row=5, column=27).value == "有"   # AA 会议纪要
 
+    @staticmethod
+    def _sign_data_url():
+        """构造 120x60 白底黑迹 PNG data URL（模拟签字 canvas）。"""
+        import base64 as _b64
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (120, 60), "white")
+        d = ImageDraw.Draw(im)
+        d.line([(10, 40), (30, 15), (50, 40), (70, 15), (90, 40)], fill="black", width=3)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+
+    def test_sign_images_inserted(self, sample_data):
+        """手写签字导出为图片：AR=inspector_sign、AU=co_inspector_sign，格内不写文本。"""
+        pid = sample_data["pid"]
+        url = self._sign_data_url()
+        storage.upsert_survey_row(pid, "table1", sample_data["sc2"], {
+            "inspector_sign": url, "co_inspector_sign": url,
+        }, "张三")
+        output, _ = exporter.export_base(pid)
+        wb = openpyxl.load_workbook(output)
+        ws = wb["2023年度人工造林"]
+        # 行5（小班3）两列签字 → 2 张图片
+        assert len(ws._images) == 2
+        cells = sorted((img.anchor._from.row + 1, img.anchor._from.col + 1)
+                       for img in ws._images)
+        assert cells == [(5, 44), (5, 47)]   # AR5 / AU5
+        # 固定显示范围：宽 ≤200px、高 ≤64px
+        for img in ws._images:
+            assert img.width <= 200 and img.height <= 64
+        # 单元格本身不写 data URL 文本
+        assert ws.cell(row=5, column=44).value in (None, "")
+        assert ws.cell(row=5, column=47).value in (None, "")
+
+    def test_sign_blank_skipped(self, sample_data):
+        """无签字 → 不插图片、单元格留空。"""
+        output, _ = exporter.export_base(sample_data["pid"])
+        wb = openpyxl.load_workbook(output)
+        for sn in wb.sheetnames:
+            assert len(wb[sn]._images) == 0
+
 
 class TestExportSamples:
     def test_returns_bytesio(self, sample_data):
