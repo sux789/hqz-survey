@@ -57,6 +57,14 @@ def main():
     for _app in (user_app, admin_app):
         _app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
+    # 模板启动自检：缺失/结构异常立即醒目提示（不阻断启动，调查功能仍可用，
+    # 但导出会以同样的精确错误失败）
+    from survey.core import exporter
+    try:
+        exporter.check_templates()
+    except RuntimeError as e:
+        print(f"!!! {e}")
+
     root.run(
         host="0.0.0.0", port=port, debug=True,
         use_reloader=True, reloader_type="stat",

@@ -21,6 +21,11 @@ L1  本地启动         survey/launcher.py            DispatcherMiddleware 挂�
 L2  启动脚本         start.sh                      本地测试（SURVEY_LOCAL_DEV=1）
 G1  网关首页         deploy/gateway/home.py        生产聚合挂载（bibook_deploy）
 
+# ═══ 模板/契约（改导出前必读）═══
+T1  导出模板         tpl/                          tpl-base.xlsx（基本信息3分类sheet）+ tpl-samples.xlsx（样地39行块）；official/ 为官方原版归档
+T2  硬约束注册表     CONSTRAINTS.md                改动红线（架构/数据模型/口径/导出/部署）
+T3  协作协议         AGENTS.md                     改动前必读、改动后全绿流程
+
 # ═══ 数据流（业务→代码映射）═══
 # GDB上传 → A1 → C4(解析) → C2(存gdb_files) → C4(生成GeoJSON)
 # 用户调查 → U1 → C2(读小班) → U2(地图渲染) → C2(存records) → C3(导出xlsx)

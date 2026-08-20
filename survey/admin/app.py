@@ -145,8 +145,12 @@ def api_gdb_upload():
         except Exception as e:
             return jsonify({"error": f"解压失败: {e}"}), 400
 
-        # 扫描分类图层
-        scan = GDB.scan_classified_layers(result["path"])
+        # 扫描分类图层（GDB 不可读时报具体原因，不再静默成「未找到分类图层」）
+        try:
+            scan = GDB.scan_classified_layers(result["path"])
+        except ValueError as e:
+            GDB.delete_gdb_files(gid)
+            return jsonify({"error": str(e)}), 400
         classified = scan["classified"]
         skipped_layers = scan["skipped"]
 

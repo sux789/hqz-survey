@@ -7,10 +7,13 @@
         输出统一转 EPSG:4326 (WGS84) 供前端地图渲染
 """
 import json
+import logging
 import os
 import shutil
 import zipfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # pyogrio / geopandas 延迟到函数内导入：服务器未装时不影响 app 加载
 
@@ -72,7 +75,9 @@ def read_project_name(gdb_path, layer):
     """
     try:
         gdf = read_layer(gdb_path, layer, max_features=50)
-    except Exception:
+    except Exception as e:
+        # 读失败回退文件名是设计行为，但原因必须留痕（如服务器缺 pyproj）
+        logger.warning("读图层 %s 项目名失败，回退文件名: %s", layer, e)
         return None
     cols = [c for c in gdf.columns if c != "geometry"]
     cands = [c for c in GDB_PROJECT_NAME_ALIASES if c in cols]
@@ -158,7 +163,9 @@ def list_layers(gdb_path):
             # 获取行数
             info = pyogrio.read_info(str(gdb_path), layer=name)
             row_count = info.get("features", 0)
-        except Exception:
+        except Exception as e:
+            # 单层读取失败不阻断整层列表，但原因必须留痕
+            logger.warning("读图层 %s 元信息失败（行列数计 0）: %s", name, e)
             field_count = 0
             row_count = 0
         layers.append({
@@ -329,8 +336,10 @@ def scan_classified_layers(gdb_path):
     skipped = []
     try:
         layers = list_layers(gdb_path)
-    except Exception:
-        return {"classified": [], "skipped": []}
+    except Exception as e:
+        # 不吞异常：此处失败=整个 GDB 不可读（缺依赖/文件损坏），
+        # 吞掉会让上层报「未找到分类图层」且 skipped 为空，无法定位
+        raise ValueError(f"无法读取 GDB 图层（依赖缺失或文件损坏）: {e}") from e
     for l in layers:
         cat = classify_layer(l["name"])
         if cat:
@@ -344,6 +353,42 @@ def scan_classified_layers(gdb_path):
     return {"classified": classified, "skipped": skipped}
 
 
+# zip 解压防护上限（防 zip 炸弹：200MB 上传限制只约束压缩后大小）
+_ZIP_MAX_MEMBERS = 10000                    # 成员数上限（正常 .gdb 约数十个文件）
+_ZIP_MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024  # 解压后总大小上限 2 GiB
+
+
+def _fix_zip_name(info):
+    """Windows 资源管理器压的中文 zip 文件名按 GBK 编码，zipfile 默认按
+    cp437 解码会乱码；此处回退 GBK 重解码（UTF-8 标记位已置的不动）。"""
+    name = info.filename
+    if info.flag_bits & 0x800:  # UTF-8 文件名标记
+        return name
+    try:
+        return name.encode("cp437").decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+
+
+def _safe_extract(zf, dest):
+    """带防护的解压：成员数/解压总量上限 + 路径穿越显式拦截 + GBK 文件名回退。"""
+    infos = zf.infolist()
+    if len(infos) > _ZIP_MAX_MEMBERS:
+        raise ValueError(f"压缩包文件数过多（{len(infos)} > {_ZIP_MAX_MEMBERS}）")
+    total = sum(i.file_size for i in infos)
+    limit_mb = _ZIP_MAX_TOTAL_SIZE // 1024 // 1024
+    if total > _ZIP_MAX_TOTAL_SIZE:
+        raise ValueError(f"压缩包解压后过大（{total // 1024 // 1024}MB > {limit_mb}MB）")
+    dest = Path(dest).resolve()
+    for info in infos:
+        name = _fix_zip_name(info)
+        target = (dest / name).resolve()
+        if target != dest and str(dest) + os.sep not in str(target) + os.sep:
+            raise ValueError(f"压缩包含非法路径: {name}")
+        info.filename = name  # 让 extract 使用修正后的文件名
+        zf.extract(info, str(dest))
+
+
 def save_gdb_upload(upload_file, gid):
     """保存上传的 GDB 文件到存储目录。
 
@@ -355,27 +400,20 @@ def save_gdb_upload(upload_file, gid):
     gdb_dir = GDB_STORAGE / gid
     gdb_dir.mkdir(parents=True, exist_ok=True)
 
-    # GDB 可能以 zip 上传
-    if hasattr(upload_file, "filename") and upload_file.filename.lower().endswith(".zip"):
-        zip_path = gdb_dir / "upload.zip"
-        upload_file.save(str(zip_path))
-        with zipfile.ZipFile(str(zip_path), "r") as zf:
-            zf.extractall(str(gdb_dir))
-        zip_path.unlink()
-    elif hasattr(upload_file, "filename") and upload_file.filename.lower().endswith(".gdb"):
-        # .gdb 是目录，无法直接 save，需走 zip
+    # .gdb 是目录，无法直接 save，需走 zip
+    if hasattr(upload_file, "filename") and upload_file.filename.lower().endswith(".gdb"):
         raise ValueError("GDB 目录无法直接上传，请压缩为 .zip 后上传")
-    else:
-        # 尝试当 zip 处理
-        zip_path = gdb_dir / "upload.zip"
-        upload_file.save(str(zip_path))
-        try:
-            with zipfile.ZipFile(str(zip_path), "r") as zf:
-                zf.extractall(str(gdb_dir))
-            zip_path.unlink()
-        except zipfile.BadZipFile:
-            zip_path.unlink()
-            raise ValueError("仅支持 .zip 格式的 GDB 压缩包")
+
+    # 其余一律当 zip 处理（不限扩展名，坏包报可读错误）
+    zip_path = gdb_dir / "upload.zip"
+    upload_file.save(str(zip_path))
+    try:
+        with zipfile.ZipFile(str(zip_path), "r") as zf:
+            _safe_extract(zf, gdb_dir)
+    except zipfile.BadZipFile:
+        zip_path.unlink()
+        raise ValueError("仅支持 .zip 格式的 GDB 压缩包")
+    zip_path.unlink()
 
     # 在一二层目录内找 .gdb 目录
     gdb_paths = find_gdb_dirs(gdb_dir)

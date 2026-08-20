@@ -3,18 +3,22 @@
 
 设计原则（2026-08 重构，不兼容旧数据）：
   - 仅三个分类：人工造林(table1)/封山育林(table2)/退化林修复(table3)
-  - 基本信息：tpl-base现地质量验收-819.xlsx（2023年度官方模板，sheet=2023年度人工造林/封山育林/退化林，预填示例）；导出前清空数据区再填值
-  - 样地：tpl-样地.xlsx 块结构（39 行/块，预填示例）；每分类一个 sheet，每小班一块向下复制；导出前清空块1示例
+  - 基本信息：tpl/tpl-base.xlsx（2023年度官方模板，sheet=2023年度人工造林/封山育林/退化林，预填示例）；导出前清空数据区再填值
+  - 样地：tpl/tpl-samples.xlsx 块结构（39 行/块）；每分类一个 sheet，每小班一块向下复制；导出前清空块1示例
   - 样地统计（苗木合格率组，表1 AN/AO/AP；表2 BE/BF/BG；表3 AS/AT/AU）：
       小班查数株数 = Σ样地种植株数（与样地模板 B30 同口径，
                      不依赖「单个网格面积×种植网格数量」）
       合格率      = Σ成活÷Σ种植×100（写数值如 95.24）
       合格株树    = round(查数株数×合格率÷100)
-  - 手写项不录入：签字（表1 AR/AU）、总样地个数、单个网格面积、种植网格数量、
+  - 手写签字导出为图片：签字 canvas 存 data_json（inspector_sign /
+    co_inspector_sign，PNG data URL），导出时裁白边+等比缩放后以图片
+    插入签字列（表1 AR/AU、表2 BI/BL、表3 AV/AY）
+  - 其余手写项不录入：总样地个数、单个网格面积、种植网格数量、
     撑杆/覆膜/备注（样地模板 I 列标「手写」行）→ 导出留空
   - 死亡株数 = 样地模板 E 列公式（种植-成活）自动算，不录入
   - 数据行按（林班, 调查小班号）数字序
 """
+import base64
 import io
 import re
 from copy import copy as _style_copy
@@ -26,25 +30,53 @@ from survey.core import schema as S
 from survey.core import storage
 from survey.core import gdb as GDB
 
-# 模板文件路径
-# 基本信息模板：项目根 tpl/ 下官方预填示例版（3 个分类 sheet，
-#   2023年度人工造林 / 2023年度封山育林 / 2023年度退化林），
+# 模板文件路径（统一项目根 tpl/ 目录，固定文件名——换官方新模板时
+# 直接替换同名文件即可，无需改代码；官方原版归档在 tpl/official/ 仅供对照）
+# 基本信息模板：tpl-base.xlsx（3 个分类 sheet：2023年度人工造林 /
+#   2023年度封山育林 / 2023年度退化林，官方预填示例），
 #   导出前必须先清空数据区（见 _clear_*），deploy.sh 会同步 tpl/。
-# 样地模板：survey/templates/tpl-样地.xlsx 清理版（块结构已清示例），
+# 样地模板：tpl-samples.xlsx 清理版（块结构已清示例），
 #   布局：R1 标题 / R2 项目类型行 / R3 年度县乡 / R4 列头 / R5-27 数据槽，
-#   39 行一块 —— 与官方 tpl/ 版（38 行块、数据 R4 起）不同，勿混用。
+#   39 行一块 —— 与 tpl/official/ 官方原版（38 行块、数据 R4 起）不同，勿混用。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _TPL_DIR = _PROJECT_ROOT / "tpl"
-# 基本信息模板：3 个分类 sheet，官方预填示例模板。
-_BASE_TEMPLATE = _TPL_DIR / "tpl-base现地质量验收-819.xlsx"
-# 样地模板：清理版块结构（行1-39 为一个小班的块）。
-_SAMPLE_TEMPLATE = _PROJECT_ROOT / "survey" / "templates" / "tpl-样地.xlsx"
+_BASE_TEMPLATE = _TPL_DIR / "tpl-base.xlsx"
+_SAMPLE_TEMPLATE = _TPL_DIR / "tpl-samples.xlsx"
+
+
+def check_templates():
+    """导出模板自检：文件存在 + 关键结构符合预期。
+
+    模板缺失或被改动结构（sheet 改名/删列）时抛 RuntimeError 并给出精确
+    原因与修复提示——避免导出时才以 FileNotFoundError/KeyError 等隐晦
+    错误失败。launcher 启动时调用一次（醒目告警），导出前再调用兜底。
+    """
+    problems = []
+    if not _BASE_TEMPLATE.exists():
+        problems.append(
+            f"缺少基本信息模板: {_BASE_TEMPLATE}"
+            "（tpl/ 由 deploy.sh 同步；本地请确认 git 仓库完整）"
+        )
+    else:
+        wb = openpyxl.load_workbook(_BASE_TEMPLATE, read_only=True)
+        names = wb.sheetnames
+        wb.close()
+        missing = [s for s in _TPL_SHEET_NAMES.values() if s not in names]
+        if missing:
+            problems.append(
+                f"{_BASE_TEMPLATE.name} 缺少分类 sheet {missing}（现有 {names}）"
+                "——模板被改动，需同步修改 exporter._TPL_SHEET_NAMES"
+            )
+    if not _SAMPLE_TEMPLATE.exists():
+        problems.append(f"缺少样地模板: {_SAMPLE_TEMPLATE}")
+    if problems:
+        raise RuntimeError("导出模板自检失败：\n" + "\n".join(f"  - {p}" for p in problems))
 
 # ── 基本信息模板列 → schema key 映射（基于 tpl-base 第3-4行表头，2026-08-20 新布局）──
 # value = (schema_key, source)
 # source: prefilled 小班预填（GDB 绿色列） | input 调查录入
 #         extra 扩展数据(轨迹/照片) | sample_stat 样地聚合统计
-# 手写签字列不映射 → 留空（手写值不录入）：
+#         sign 手写签字（data_json 里的 PNG data URL → 以图片插入单元格）：
 #   表1 AR/AU、表2 BI/BL、表3 AV/AY。
 # 打卡坐标列统一走 input（录入值优先，回退 extras 打卡记录）。
 _TPL_COL_MAPS = {
@@ -92,13 +124,14 @@ _TPL_COL_MAPS = {
         'AO': ('qualified_count', 'sample_stat'),   # 合格株树 = 查数株数×合格率
         'AP': ('qualified_rate', 'sample_stat'),    # 合格率 = Σ成活/Σ种植×100
         'AQ': ('design_count', 'prefilled'),        # 小班设计株树（GDB 小班设计株树/需苗量）
-        # AR/AU 手写签字 → 留空
+        'AR': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
         'AS': ('inspect_time', 'input'),
         'AT': ('remark', 'input'),
         'AV': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
         'AW': ('sample_coord_y', 'input'),          # 打卡坐标y
         'AX': ('track', 'extra'),                   # 轨迹 GPX 文件名
         'AY': ('photos', 'extra'),                  # 小班照片文件名
+        'AU': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
     },
     "table2": {  # 表2－封山育林验收因子表（新布局：B调查小班号 F小班 R造林树种 T补植面积 AF优势树种 AG封前地类 AI郁闭度 BH小班设计株树）
         'A': ('city', 'prefilled'),
@@ -161,9 +194,10 @@ _TPL_COL_MAPS = {
         'BF': ('qualified_count', 'sample_stat'),   # 合格株树
         'BG': ('qualified_rate', 'sample_stat'),    # 合格率
         'BH': ('design_count', 'prefilled'),        # 小班设计株树（GDB 绿色）
-        # BI/BL 手写签字 → 留空
+        'BI': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
         'BJ': ('inspect_time', 'input'),
         'BK': ('remark', 'input'),
+        'BL': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
         'BM': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
         'BN': ('sample_coord_y', 'input'),          # 打卡坐标y
         'BO': ('track', 'extra'),                   # 轨迹 GPX 文件名
@@ -217,9 +251,10 @@ _TPL_COL_MAPS = {
         'AS': ('qualified_count', 'sample_stat'),   # 合格株树
         'AT': ('qualified_rate', 'sample_stat'),    # 合格率
         'AU': ('design_count', 'prefilled'),        # 小班设计株树（GDB 绿色）
-        # AV/AY 手写签字 → 留空
+        'AV': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
         'AW': ('inspect_time', 'input'),
         'AX': ('remark', 'input'),
+        'AY': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
         'AZ': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
         'BA': ('sample_coord_y', 'input'),          # 打卡坐标y
         'BB': ('track', 'extra'),                   # 轨迹 GPX 文件名
@@ -227,7 +262,7 @@ _TPL_COL_MAPS = {
     },
 }
 
-# 分类 → 基本信息模板 sheet 名（tpl-base现地质量验收-819.xlsx 内）
+# 分类 → 基本信息模板 sheet 名（tpl-base.xlsx 内）
 _TPL_SHEET_NAMES = {
     "人工造林": "2023年度人工造林",
     "封山育林": "2023年度封山育林",
@@ -237,7 +272,7 @@ _TPL_SHEET_NAMES = {
 # 基本信息模板数据起始行（1-2 标题，3-4 表头）
 _BASE_DATA_START = 5
 
-# 样地模板块结构（tpl-样地.xlsx，块高 39 行）
+# 样地模板块结构（tpl-samples.xlsx，块高 39 行）
 _SAMPLE_BLOCK_ROWS = 39
 _SAMPLE_DATA_START = 5    # 块内数据起始行（样圆号 1）
 _SAMPLE_DATA_SLOTS = 23   # 模板预留样地槽位数（行5-27）
@@ -388,6 +423,10 @@ def _resolve_cell(key, source, prefilled, input_data, extras, stats, sc_row, fie
                     if isinstance(val, list):
                         return ';'.join(str(x) for x in val if x)
         return val
+    if source == 'sign':
+        # 手写签字：data_json 里的 PNG data URL（由前端签字 canvas 保存），
+        # 值本身不写单元格——由填充循环调 _insert_sign_image 以图片插入
+        return input_data.get(key, '')
     if source == 'sample_stat':
         return stats.get(key)
     if source == 'extra':
@@ -400,11 +439,51 @@ def _resolve_cell(key, source, prefilled, input_data, extras, stats, sc_row, fie
     return ''
 
 
+def _insert_sign_image(ws, row, col, data_url):
+    """把手写签字 PNG（data URL）插入单元格：裁白边 → 等比缩放至固定范围 → 锚定格左上角。
+
+    签字 canvas 大部分是空白，先裁掉白边只留笔迹包围盒；再等比缩放到
+    固定显示范围（宽 ≤200px、高 ≤64px，只缩不放）——不按单元格尺寸
+    计算，允许图片浮在格上（Excel/WPS 中点击图片可放大查看原图）。
+    无笔迹/解析失败静默跳过（不影响导出）。
+    """
+    try:
+        from PIL import Image as PILImage, ImageOps
+        from openpyxl.drawing.image import Image as XLImage
+    except ImportError:
+        return  # 环境缺 Pillow：跳过签字图片（其余导出不受影响）
+    try:
+        b64 = data_url.split(',', 1)[1]
+        raw = base64.b64decode(b64)
+        im = PILImage.open(io.BytesIO(raw))
+        # 裁白边：反色后 getbbox 得到笔迹包围盒（canvas 白底黑迹）
+        bbox = ImageOps.invert(im.convert('L')).getbbox()
+        if bbox:
+            pad = 4
+            im = im.crop((max(0, bbox[0] - pad), max(0, bbox[1] - pad),
+                          min(im.width, bbox[2] + pad), min(im.height, bbox[3] + pad)))
+        if im.width < 8 or im.height < 8:
+            return  # 空白签字
+        # 固定显示范围等比缩放（只缩不放）
+        max_w, max_h = 200, 64
+        scale = min(max_w / im.width, max_h / im.height, 1.0)
+        buf = io.BytesIO()
+        im.save(buf, format='PNG')
+        buf.seek(0)
+        img = XLImage(buf)
+        img.width = max(1, int(im.width * scale))
+        img.height = max(1, int(im.height * scale))
+        img.anchor = ws.cell(row=row, column=col).coordinate  # 锚定单元格左上角
+        ws.add_image(img)
+    except Exception:
+        return  # 单条签字损坏不阻断整个导出
+
+
 def _clear_base_data_region(ws):
     """清空基本信息模板数据区（行5起），去除官方模板预填的示例数据。
 
     保留 1-4 行表头与行样式/合并单元格，仅清单元格值。
-    官方 tpl-base现地质量验收-819.xlsx 预填了华宁/澄江等示例行（最多 788 行），
+    官方 tpl-base.xlsx 预填了华宁/澄江等示例行（最多 788 行），
     不清空会导致导出文件残留无关示例数据。
     """
     for r in range(_BASE_DATA_START, ws.max_row + 1):
@@ -427,6 +506,7 @@ def export_base(pid, output_path=None, category=None):
     Returns:
         (output_path, stats) 元组
     """
+    check_templates()
     project = storage.get_project(pid)
     if not project:
         raise ValueError(f"项目 {pid} 不存在")
@@ -465,6 +545,11 @@ def export_base(pid, output_path=None, category=None):
             for col_letter, (key, source) in _TPL_COL_MAPS[table_id].items():
                 val = _resolve_cell(key, source, prefilled, input_data,
                                     extras, stats_v, sc_row, field_types)
+                if source == 'sign':
+                    # 手写签字：data URL → 裁白边缩放后以图片插入（不写文本）
+                    if isinstance(val, str) and val.startswith('data:image'):
+                        _insert_sign_image(ws, row_num, _col_number(col_letter), val)
+                    continue
                 if val not in ('', None):
                     ws.cell(row=row_num, column=_col_number(col_letter), value=val)
         stats["sheets"][cat] = len(sc_rows)
@@ -479,7 +564,7 @@ def export_base(pid, output_path=None, category=None):
 
 
 # ════════════════════════════════════════════
-# 样地导出（tpl-样地，块结构）
+# 样地导出（tpl-samples，块结构）
 # ════════════════════════════════════════════
 
 def _copy_sample_block(ws, offset):
@@ -584,7 +669,7 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
 def _clear_sample_template_block(ws):
     """清空样地模板块1的预填示例，保留标题/表头/汇总公式。
 
-    官方 tpl-样地.xlsx 块1 预填了示例样地（R5-R8 的 150/22/21 等）、
+    样地模板 tpl-samples.xlsx 块1 预填了示例样地（R5-R8 的 150/22/21 等）、
     总样地个数(R28 B=5)、单个网格面积(R33 B=5000)、种植网格数量(R34 B=4)。
     不清空会残留在导出文件里。块1清空后，copy_worksheet 得到的每个块都是干净脚手架。
     汇总公式（R29-R35：=SUM/B30/B35 等）保留不动。
@@ -612,7 +697,7 @@ def _sheet_safe(name):
 
 
 def export_samples(pid, output_path=None, subcompartment_id=None):
-    """导出项目样地 xlsx（tpl-样地 模板，每分类一个 sheet，每小班一个 39 行块）。
+    """导出项目样地 xlsx（tpl-samples 模板，每分类一个 sheet，每小班一个 39 行块）。
 
     Args:
         pid: 项目 ID
@@ -623,6 +708,7 @@ def export_samples(pid, output_path=None, subcompartment_id=None):
     Returns:
         (output_path, stats) 元组
     """
+    check_templates()
     project = storage.get_project(pid)
     if not project:
         raise ValueError(f"项目 {pid} 不存在")
