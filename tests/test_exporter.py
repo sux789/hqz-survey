@@ -250,7 +250,7 @@ class TestExportBase:
         assert ws.cell(row=7, column=43).value == 11000      # AQ 株树
 
     def test_orig_subcompartment_chinese(self, sample_data):
-        """原始小班可能包含汉字：非数值原样保留（G 列）。"""
+        """旧数据（含「小班原始」键）：汉字原样保留（G 列，兼容读取）。"""
         pid = sample_data["pid"]
         _insert_sc_row(pid, {
             "市": "测试市", "县": "测试县", "乡镇": "测试乡", "村": "测试村",
@@ -259,7 +259,51 @@ class TestExportBase:
         output, _ = exporter.export_base(pid)
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        assert ws.cell(row=7, column=7).value == "红9"   # G 小班原始
+        assert ws.cell(row=7, column=7).value == "红9"   # G 小班
+
+    def test_subcompartment_chinese_new_import(self, sample_data):
+        """新导入形态（无「小班原始」）：小班=GDB 原值含汉字（G 列原样），
+        调查小班号=数字业务键（B 列）。"""
+        pid = sample_data["pid"]
+        _insert_sc_row(pid, {
+            "市": "测试市", "县": "测试县", "乡镇": "测试乡", "村": "测试村",
+            "林班": 1, "小班": "红9", "调查小班号": 9,
+        }, forest_compartment=1, subcompartment=9, row_index=9)
+        output, _ = exporter.export_base(pid)
+        wb = openpyxl.load_workbook(output)
+        ws = wb["2023年度人工造林"]
+        assert ws.cell(row=7, column=2).value == 9        # B 调查小班号（数字）
+        assert ws.cell(row=7, column=7).value == "红9"   # G 小班（汉字原样）
+
+    def test_subcompartment_mapping(self):
+        """字段映射：小班→subcompartment_orig（原值），调查小班号→subcompartment（uint）；
+        旧键「小班原始」兼容优先。"""
+        pf = S.map_subcompartment_to_prefilled(
+            {"小班": "红9", "调查小班号": 9})
+        assert pf["subcompartment_orig"] == "红9"
+        assert pf["subcompartment"] == 9
+
+        # 旧数据：小班被旧导入覆写为数字，小班原始保留原值 → 原值优先
+        pf_old = S.map_subcompartment_to_prefilled(
+            {"小班": 5, "调查小班号": "5.0", "小班原始": "71"})
+        assert pf_old["subcompartment_orig"] == "71"
+        assert pf_old["subcompartment"] == 5
+
+        # 无小班字段：subcompartment_orig 缺省，导出回退调查小班号
+        pf_min = S.map_subcompartment_to_prefilled({"调查小班号": "12.0"})
+        assert pf_min["subcompartment"] == 12
+        assert "subcompartment_orig" not in pf_min
+
+    def test_derive_uint_with_digits(self):
+        """调查小班号推导：数值直转；含汉字提取数字；无数字→0。"""
+        f = storage._derive_uint_with_digits
+        assert f("5.0") == 5
+        assert f(7) == 7
+        assert f("红9") == 9
+        assert f("新增17") == 17
+        assert f("红") == 0
+        assert f("") == 0
+        assert f(None) == 0
 
     def test_checkin_coord_precision(self, sample_data):
         """打卡坐标全精度（GPS 6 位小数），不被 _fmt_num 舍入到 2 位。"""

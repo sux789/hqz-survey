@@ -38,6 +38,8 @@ const state = {
   gridCheckin: '',        // 网格打卡状态筛选（''=全部 done=已打卡 undone=未打卡）
   _grid: null,            // jspreadsheet 实例
   _gridSurveyMap: {},     // {subcompartment_id: data} 已有调查数据
+  _gridVerMap: {},        // {subcompartment_id: version} 读取时版本号（乐观锁）
+  _gridBaseMap: {},       // {subcompartment_id: data} 读取时基线快照（算"我改了哪些字段"）
   subcompartmentPrefilledMap: {}, // {sc_id: prefilled_dict} 网格黄色列取值
   // 级联筛选：项目 → 分类 → 县/乡/村/林班 → 小班
   gridCategory: '',                // 当前分类（''=全部分类）
@@ -951,14 +953,199 @@ async function bindSurveyGridPage() {
 
 // 加载当前表全部调查数据（选定小班编辑 + 打卡状态筛选共用）
 async function loadGridSubcompartmentData() {
-  if (!state.project || !state.gridTable) { state._gridSurveyMap = {}; return; }
+  if (!state.project || !state.gridTable) { state._gridSurveyMap = {}; state._gridVerMap = {}; state._gridBaseMap = {}; return; }
   try {
     const url = `api/projects/${state.project.id}/survey/${state.gridTable}/rows`;
     const j = await fetchJSON(url);
-    const map = {};
-    (j.rows || []).forEach(r => { map[r.subcompartment_id] = r.data || {}; });
-    state._gridSurveyMap = map;
-  } catch (e) { state._gridSurveyMap = {}; }
+    applyLoadedSurveyRows(j.rows || []);
+  } catch (e) { state._gridSurveyMap = {}; state._gridVerMap = {}; state._gridBaseMap = {}; }
+}
+
+// 全量应用服务端返回的调查行：数据 + 乐观锁版本号 + 基线快照（深拷贝，
+// 供冲突时 diff「我改了哪些字段」——样地页对 map 值是就地修改，浅拷贝不够）
+function applyLoadedSurveyRows(rows) {
+  const map = {}, vm = {}, bm = {};
+  (rows || []).forEach(r => {
+    const d = r.data || {};
+    map[r.subcompartment_id] = d;
+    vm[r.subcompartment_id] = (r.version != null) ? r.version : 1;
+    bm[r.subcompartment_id] = JSON.parse(JSON.stringify(d));
+  });
+  state._gridSurveyMap = map;
+  state._gridVerMap = vm;
+  state._gridBaseMap = bm;
+}
+
+// 网格页保存成功后同步版本号 + 基线快照（仅当前 gridTable 的 map）
+function markGridRowSaved(scId, rec, savedData) {
+  if (!scId) return;
+  if (rec && rec.version != null) state._gridVerMap[scId] = rec.version;
+  state._gridBaseMap[scId] = JSON.parse(JSON.stringify(savedData || (rec && rec.data) || {}));
+}
+
+// 读取当前小班的乐观锁版本号（无记录 = 0，表示「首次创建须不存在」）
+function gridRowVersion(scId) {
+  return (scId && state._gridVerMap[scId] != null) ? state._gridVerMap[scId] : 0;
+}
+
+// 统一 PUT 调查行（乐观锁）：409 冲突返回 {ok:false, conflict}，其余异常抛出
+async function putSurveyRow(tid, scId, data, inspector, baseVersion) {
+  const body = { subcompartment_id: scId, data, inspector };
+  if (baseVersion != null) body.base_version = baseVersion;
+  const res = await apiFetch(`api/projects/${state.project.id}/survey/${tid}/rows`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 409) {
+    const j = await res.json().catch(() => ({}));
+    return { ok: false, conflict: (j && j.conflict) || null };
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return { ok: true, rec: await res.json() };
+}
+
+// ── 保存冲突（乐观锁 409）：弹窗展示双方改动，提供 合并/覆盖/加载最新 ──
+
+// 字段 key → 展示 label（冲突弹窗用）：表定义字段 + 样地页/汇总区固定项
+function fieldLabelMap(tid) {
+  const m = {};
+  const def = getGridTableDef(tid) || getTableDef(tid);
+  ((def && def.prefilled_columns) || []).concat((def && def.input_columns) || []).forEach(f => {
+    if (f.key) m[f.key] = f.label || f.key;
+  });
+  Object.assign(m, {
+    samples: '样地列表',
+    sm_total_count: '总样地个数', sm_grid_area: '单个网格面积', sm_grid_count: '种植网格数量',
+    sm_pole: '撑杆情况', sm_film: '覆膜情况', sm_inspector: '验收人',
+    sm_inspect_date: '验收日期', sm_remark: '备注',
+  });
+  return m;
+}
+
+// 表内 computed 字段 key 集合（diff 展示时过滤——computed 随输入联动，保存前会重算）
+function computedKeySet(tid) {
+  const def = getGridTableDef(tid) || getTableDef(tid);
+  const s = {};
+  ((def && def.input_columns) || []).forEach(f => { if (f.type === 'computed') s[f.key] = 1; });
+  return s;
+}
+
+// diff：base → cur 间值有变化（含增删）的顶层 key（过滤 inspector/computed 噪音）
+function diffChangedKeys(base, cur, computedKeys) {
+  const b = base || {}, c = cur || {};
+  const out = [];
+  new Set([...Object.keys(b), ...Object.keys(c)]).forEach(k => {
+    if (k === 'inspector') return;
+    if (computedKeys && computedKeys[k]) return;
+    if (JSON.stringify(b[k]) !== JSON.stringify(c[k])) out.push(k);
+  });
+  return out;
+}
+
+// 合并：以对方最新数据为底，叠加我改过的字段（调用方保存前重算 computed）
+function mergeSurveyData(theirData, myData, myChangedKeys) {
+  const merged = JSON.parse(JSON.stringify(theirData || {}));
+  (myChangedKeys || []).forEach(k => { merged[k] = (myData || {})[k]; });
+  return merged;
+}
+
+// 保存前重算 computed 字段（就地修改并返回；冲突弹窗合并/覆盖的数据也要重算，
+// 防止对方的旧统计值随合并数据混入）
+function recomputeComputedFields(d, tid) {
+  const def = getGridTableDef(tid) || getTableDef(tid);
+  ((def && def.input_columns) || []).forEach(f => {
+    if (f.type === 'computed') d[f.key] = computeFieldValue(f.formula, d);
+  });
+  return d;
+}
+
+// 冲突弹窗。ctx: {tid, scId, myData, myBase, conflict,
+//   saveFn(data, baseVersion) -> putSurveyRow 结果,
+//   onSaved(rec, savedData), onLoaded(data, version)}
+// 按钮布局：主行 = 合并保存（推荐，仅双方无重叠改动时）或 用我的覆盖；
+// 次行 = 加载最新（丢弃我的修改）/ 取消（点遮罩同取消，保留我的修改稍后处理）。
+function showRowConflictDialog(ctx) {
+  const { tid, myData, conflict, saveFn, onSaved, onLoaded } = ctx;
+  const their = (conflict && conflict.data) || {};
+  const ck = computedKeySet(tid);
+  const labels = fieldLabelMap(tid);
+  const myBase = ctx.myBase != null ? ctx.myBase : (state._gridBaseMap[ctx.scId] || {});
+  const myKeys = diffChangedKeys(myBase, myData, ck);
+  const theirKeys = diffChangedKeys(myBase, their, ck);
+  const overlap = myKeys.filter(k => theirKeys.includes(k));
+  const canMerge = overlap.length === 0;
+  const fmt = ks => {
+    if (!ks.length) return '（无）';
+    const ls = ks.map(k => labels[k] || k);
+    return ls.length > 6 ? ls.slice(0, 6).join('、') + ` 等 ${ls.length} 项` : ls.join('、');
+  };
+  const who = (conflict && conflict.inspector) || '其他用户';
+  const when = (conflict && conflict.updated_at) || '';
+  const root = qs('#modalRoot');
+  root.innerHTML = `
+    <div class="modal-mask">
+      <div class="modal">
+        <h3>数据已被他人修改</h3>
+        <div class="sm-confirm-tip">该小班数据在你编辑期间被 <b>${escapeHtml(who)}</b>${when ? `（${escapeHtml(when)}）` : ''} 保存过新版本。</div>
+        <div class="cf-diff">
+          <div><span class="cf-side">对方修改了</span>${escapeHtml(fmt(theirKeys))}</div>
+          <div><span class="cf-side">你修改了</span>${escapeHtml(fmt(myKeys))}</div>
+          ${canMerge ? '' : `<div class="cf-overlap">双方都改了：${escapeHtml(fmt(overlap))}，无法自动合并，需选择以谁为准</div>`}
+        </div>
+        <div class="modal-actions">
+          ${canMerge
+            ? '<button class="btn-confirm" data-cf="merge">合并保存（推荐）</button>'
+            : '<button class="btn-confirm" data-cf="overwrite">用我的覆盖</button>'}
+        </div>
+        <div class="modal-actions">
+          <button class="btn-cancel" data-cf="cancel">取消</button>
+          <button class="btn-cancel" data-cf="reload">加载最新（丢弃我的修改）</button>
+        </div>
+      </div>
+    </div>`;
+  const maskEl = root.querySelector('.modal-mask');
+  const close = () => { root.innerHTML = ''; };
+  // 保存动作（合并/覆盖）：CAS 用冲突返回的最新 version；再冲突则用新数据刷新弹窗
+  const doSave = async (data, label) => {
+    root.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      const r = await saveFn(data, (conflict && conflict.version) || 0);
+      if (r && r.ok) {
+        close();
+        if (onSaved) onSaved(r.rec, data);
+        toast(label + '成功', 1800);
+      } else if (r && r.conflict) {
+        showRowConflictDialog(Object.assign({}, ctx, { conflict: r.conflict }));
+        toast('对方又保存了新版本，请重新选择', 2500);
+      } else {
+        throw new Error('保存失败');
+      }
+    } catch (e) {
+      toast('保存失败：' + (e.message || e), 2500);
+      root.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    }
+  };
+  root.querySelectorAll('[data-cf]').forEach(b => b.addEventListener('click', ev => {
+    ev.stopPropagation();
+    const act = b.dataset.cf;
+    if (act === 'cancel') { close(); return; }
+    if (act === 'reload') {
+      close();
+      if (onLoaded) onLoaded(their, (conflict && conflict.version) || 1);
+      toast('已加载最新数据', 1800);
+      return;
+    }
+    if (act === 'merge') {
+      doSave(mergeSurveyData(their, myData, myKeys), '合并保存');
+      return;
+    }
+    if (act === 'overwrite') doSave(myData, '覆盖保存');
+  }));
+  // 点遮罩 = 取消（保留我的修改，稍后处理）
+  maskEl.addEventListener('click', ev => {
+    if (ev.target === ev.currentTarget) close();
+  });
 }
 
 // 公式计算：根据 formula 名和数据计算 computed 字段值
@@ -1287,11 +1474,28 @@ async function saveSign() {
   existing['inspector'] = state.user || '';
   state._gridSurveyMap[sc.id] = existing;
   try {
-    await fetch(`api/projects/${state.project.id}/survey/${state.gridTable}/rows`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subcompartment_id: sc.id, data: existing, inspector: state.user || '' }),
-    });
+    const r = await putSurveyRow(state.gridTable, sc.id, existing, state.user || '', gridRowVersion(sc.id));
+    if (!r.ok) {
+      showRowConflictDialog({
+        tid: state.gridTable, scId: sc.id, myData: existing, conflict: r.conflict,
+        saveFn: (data, bv) => putSurveyRow(state.gridTable, sc.id, recomputeComputedFields(data, state.gridTable), state.user || '', bv),
+        onSaved: (rec, saved) => {
+          state._gridSurveyMap[sc.id] = saved;
+          markGridRowSaved(sc.id, rec, saved);
+          renderSurveyForm();
+          toast('签字已保存', 1200);
+        },
+        onLoaded: (data, ver) => {
+          state._gridSurveyMap[sc.id] = data;
+          state._gridVerMap[sc.id] = ver;
+          state._gridBaseMap[sc.id] = JSON.parse(JSON.stringify(data));
+          renderSurveyForm();
+          renderSignCards(sc, data);
+        },
+      });
+      return;
+    }
+    markGridRowSaved(sc.id, r.rec, existing);
     toast('签字已保存', 1200);
   } catch (e) {
     toast('保存失败：' + e.message, 2200);
@@ -1328,11 +1532,27 @@ async function onGridCellChange(x, y, value) {
   });
   state._gridSurveyMap[sc.id] = existing;
   try {
-    await fetch(`api/projects/${state.project.id}/survey/${state.gridTable}/rows`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subcompartment_id: sc.id, data: existing, inspector: state.user || '' }),
-    });
+    const r = await putSurveyRow(state.gridTable, sc.id, existing, state.user || '', gridRowVersion(sc.id));
+    if (!r.ok) {
+      // 乐观锁冲突：弹窗选择 合并/覆盖/加载最新
+      showRowConflictDialog({
+        tid: state.gridTable, scId: sc.id, myData: existing, conflict: r.conflict,
+        saveFn: (data, bv) => putSurveyRow(state.gridTable, sc.id, recomputeComputedFields(data, state.gridTable), state.user || '', bv),
+        onSaved: (rec, saved) => {
+          state._gridSurveyMap[sc.id] = saved;
+          markGridRowSaved(sc.id, rec, saved);
+          renderSurveyForm();
+        },
+        onLoaded: (data, ver) => {
+          state._gridSurveyMap[sc.id] = data;
+          state._gridVerMap[sc.id] = ver;
+          state._gridBaseMap[sc.id] = JSON.parse(JSON.stringify(data));
+          renderSurveyForm();
+        },
+      });
+      return;
+    }
+    markGridRowSaved(sc.id, r.rec, existing);
   } catch (e) {
     toast('保存失败：' + e.message, 2200);
   }
@@ -1777,20 +1997,48 @@ async function saveSurvey() {
   const inspector = data.inspector || data.surveyor || state.user || '';
   const scId = state.subcompartment.id;
   const isUpdate = !!state.editRecordId;
-
-  try {
-    // 一对一模型：统一走 PUT survey/<tid>/rows upsert
-    const savedRec = await fetchJSON(`api/projects/${pid}/survey/${tid}/rows`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subcompartment_id: scId, data, inspector }),
-    });
+  // 乐观锁基线：records 里尚未被本次保存覆盖的旧记录（含 version），无记录 = 0（新建）
+  const baseRec = (state.records[tid] || []).find(r => r.subcompartment_id === scId);
+  const baseVersion = baseRec ? (baseRec.version != null ? baseRec.version : 1) : 0;
+  const baseData = baseRec ? (baseRec.data || {}) : {};
+  // records 条目落库/更新（保存成功后同步 version）
+  const applySavedRec = (savedRec) => {
     if (!state.records[tid]) state.records[tid] = [];
     const idx = state.records[tid].findIndex(r => r.id === savedRec.id);
     if (idx >= 0) state.records[tid][idx] = Object.assign({}, state.records[tid][idx], savedRec);
     else state.records[tid].push(savedRec);
-    // 一对一：保存后保持编辑状态（不清空），后续编辑即更新同一记录
     state.editRecordId = savedRec.id;
+  };
+
+  try {
+    // 一对一模型：统一走 PUT survey/<tid>/rows upsert（带乐观锁版本）
+    const r = await putSurveyRow(tid, scId, data, inspector, baseVersion);
+    if (!r.ok) {
+      state.busy = false;
+      showRowConflictDialog({
+        tid, scId, myData: data, myBase: baseData, conflict: r.conflict,
+        saveFn: (d, bv) => putSurveyRow(tid, scId, recomputeComputedFields(d, tid), inspector, bv),
+        onSaved: (rec, saved) => {
+          applySavedRec(rec);
+          state.formData = Object.assign({}, saved);
+          state.busy = false;
+          renderProgress();
+          renderContent();
+        },
+        onLoaded: (loaded, ver) => {
+          if (baseRec) {
+            baseRec.data = loaded;
+            baseRec.version = ver;
+          }
+          state.formData = Object.assign({}, loaded);
+          state.busy = false;
+          renderProgress();
+          renderContent();
+        },
+      });
+      return;
+    }
+    applySavedRec(r.rec);
   } catch (e) {
     state.busy = false;
     toast('保存失败：' + e.message, 2500);
@@ -2023,44 +2271,52 @@ async function fillSampleCoords(scId, lng, lat) {
     const hasCoord = fields.some(f => f.key === 'sample_coord_x');
     const hasDate = fields.some(f => f.key === 'inspect_time');
     if (!hasCoord && !hasDate) return;
-    // 拉取该表全部记录，合并保存（避免覆盖其它字段）
-    const j = await fetchJSON(`api/projects/${state.project.id}/survey/${tid}/rows`);
-    const rec = (j.rows || []).find(r => r.subcompartment_id === scId);
-    const existing = Object.assign({}, (rec && rec.data) || {});
-    if (tid === state.gridTable) {
-      // 顺带全量刷新缓存，打卡状态筛选立即准确
-      const m = {};
-      (j.rows || []).forEach(r => { m[r.subcompartment_id] = r.data || {}; });
-      state._gridSurveyMap = m;
-    }
-    let changed = false;
-    let coordFilled = false;
-    // 样地坐标：为空才填（不覆盖手工精测值）
-    if (hasCoord) {
-      if (existing.sample_coord_x == null || existing.sample_coord_x === '') {
-        existing.sample_coord_x = Number(lng); changed = true; coordFilled = true;
+    // 拉取该表全部记录，合并保存（避免覆盖其它字段）；
+    // 携记录 version 走乐观锁，409 冲突时静默重拉重试一次，仍冲突放弃（后台补填，不打扰）
+    const doFill = async () => {
+      const j = await fetchJSON(`api/projects/${state.project.id}/survey/${tid}/rows`);
+      const rec = (j.rows || []).find(r => r.subcompartment_id === scId);
+      const existing = Object.assign({}, (rec && rec.data) || {});
+      if (tid === state.gridTable) {
+        // 顺带全量刷新缓存（数据+版本+基线快照），打卡状态筛选立即准确
+        applyLoadedSurveyRows(j.rows || []);
       }
-      if (existing.sample_coord_y == null || existing.sample_coord_y === '') {
-        existing.sample_coord_y = Number(lat); changed = true; coordFilled = true;
+      let changed = false;
+      let coordFilled = false;
+      // 样地坐标：为空才填（不覆盖手工精测值）
+      if (hasCoord) {
+        if (existing.sample_coord_x == null || existing.sample_coord_x === '') {
+          existing.sample_coord_x = Number(lng); changed = true; coordFilled = true;
+        }
+        if (existing.sample_coord_y == null || existing.sample_coord_y === '') {
+          existing.sample_coord_y = Number(lat); changed = true; coordFilled = true;
+        }
       }
+      // 验收时间：为空则填打卡当天（坐标已有值也照填，不受上面坐标提前返回影响）
+      if (hasDate && (existing.inspect_time == null || existing.inspect_time === '')) {
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        existing.inspect_time = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        changed = true;
+      }
+      if (!changed) return { skipped: true };
+      if (!existing.inspector) existing.inspector = state.user || '';
+      const bv = rec ? (rec.version != null ? rec.version : 1) : 0;
+      const r = await putSurveyRow(tid, scId, existing, state.user || '', bv);
+      return { r, existing, coordFilled };
+    };
+    let res = await doFill();
+    if (res.skipped) return;
+    if (res.r && !res.r.ok) {
+      // 版本冲突：他人在我读取后先保存 → 重拉最新再试一次（只填空值，天然安全）
+      res = await doFill();
+      if (res.skipped || !res.r || !res.r.ok) return;
     }
-    // 验收时间：为空则填打卡当天（坐标已有值也照填，不受上面坐标提前返回影响）
-    if (hasDate && (existing.inspect_time == null || existing.inspect_time === '')) {
-      const d = new Date();
-      const pad = n => String(n).padStart(2, '0');
-      existing.inspect_time = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-      changed = true;
-    }
-    if (!changed) return;
-    if (!existing.inspector) existing.inspector = state.user || '';
-    await fetch(`api/projects/${state.project.id}/survey/${tid}/rows`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subcompartment_id: scId, data: existing, inspector: state.user || '' }),
-    });
+    const { existing, coordFilled } = res;
     // 同步缓存 + 刷新网格显示（当前表匹配且正显示该小班时）
     if (tid === state.gridTable) {
       state._gridSurveyMap[scId] = existing;
+      markGridRowSaved(scId, res.r.rec, existing);
       (state._gridRowFields || []).forEach((f, idx) => {
         if ((f.key === 'sample_coord_x' || f.key === 'sample_coord_y' || f.key === 'inspect_time') && state._grid) {
           state._grid.setValueFromCoords(1, idx, String(existing[f.key]));
@@ -3178,25 +3434,40 @@ async function saveSamplesNow(silent, retries) {
   if (!sc || !state.project) return false;
   const d = state._gridSurveyMap[sc.id] || {};
   // 重算 computed 统计字段（与网格保存同口径）
-  const tdef = getGridTableDef(state.gridTable);
-  ((tdef && tdef.input_columns) || []).forEach(f => {
-    if (f.type === 'computed') d[f.key] = computeFieldValue(f.formula, d);
-  });
+  recomputeComputedFields(d, state.gridTable);
   d.inspector = d.inspector || state.user || '';
-  const url = `api/projects/${state.project.id}/survey/${state.gridTable}/rows`;
-  const opts = {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ subcompartment_id: sc.id, data: d, inspector: d.inspector }),
-  };
-  // 走统一封装（401 跳登录）；Failed to fetch（弱网/断网）自动重试
+  const tid = state.gridTable;
+  // 走统一封装（401 跳登录）；Failed to fetch（弱网/断网）自动重试；
+  // 409 乐观锁冲突不重试——弹窗由用户决策（合并/覆盖/加载最新）
   const tries = (retries || 0) + 1;
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await apiFetch(url, opts);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return true;
+      const r = await putSurveyRow(tid, sc.id, d, d.inspector, gridRowVersion(sc.id));
+      if (r.ok) {
+        markGridRowSaved(sc.id, r.rec, d);
+        return true;
+      }
+      // 冲突：弹窗（保存状态由弹窗回调接管——成功置 ✓，取消保持 ✗ 可重试）
+      showRowConflictDialog({
+        tid, scId: sc.id, myData: d, conflict: r.conflict,
+        saveFn: (data, bv) => putSurveyRow(tid, sc.id, recomputeComputedFields(data, tid), d.inspector, bv),
+        onSaved: (rec, saved) => {
+          state._gridSurveyMap[sc.id] = saved;
+          markGridRowSaved(sc.id, rec, saved);
+          _smDirty = false;
+          smSetState('✓ 已保存', 'sm-saved');
+          renderApp();
+        },
+        onLoaded: (data, ver) => {
+          state._gridSurveyMap[sc.id] = data;
+          state._gridVerMap[sc.id] = ver;
+          state._gridBaseMap[sc.id] = JSON.parse(JSON.stringify(data));
+          _smDirty = false;
+          renderApp();
+        },
+      });
+      return false;
     } catch (e) {
       lastErr = e;
       if (String(e.message || '').includes('未登录')) return false;  // 跳登录场景不再重试

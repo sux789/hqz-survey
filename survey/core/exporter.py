@@ -94,7 +94,7 @@ _TPL_COL_MAPS = {
         'D': ('township', 'prefilled'),
         'E': ('village', 'prefilled'),
         'F': ('forest_compartment', 'prefilled'),
-        'G': ('subcompartment_orig', 'prefilled'),  # 小班原始值（无则回退调查小班号）
+        'G': ('subcompartment_orig', 'prefilled'),  # 小班（GDB 原值，可含汉字；无则回退调查小班号）
         'H': ('check_type', 'prefilled'),
         'I': ('project_name', 'prefilled'),
         'J': ('plan_year', 'prefilled'),
@@ -146,7 +146,7 @@ _TPL_COL_MAPS = {
         'C': ('county', 'prefilled'),
         'D': ('township', 'prefilled'),
         'E': ('village', 'prefilled'),
-        'F': ('subcompartment_orig', 'prefilled'),  # 小班原始值（无则回退调查小班号）
+        'F': ('subcompartment_orig', 'prefilled'),  # 小班（GDB 原值，可含汉字；无则回退调查小班号）
         'G': ('check_type', 'prefilled'),
         'H': ('project_name', 'prefilled'),
         'I': ('plan_year', 'prefilled'),
@@ -217,7 +217,7 @@ _TPL_COL_MAPS = {
         'D': ('township', 'prefilled'),
         'E': ('village', 'prefilled'),
         'F': ('forest_compartment', 'prefilled'),
-        'G': ('subcompartment_orig', 'prefilled'),  # 小班原始值（无则回退调查小班号）
+        'G': ('subcompartment_orig', 'prefilled'),  # 小班（GDB 原值，可含汉字；无则回退调查小班号）
         'H': ('check_type', 'prefilled'),
         'I': ('project_name', 'prefilled'),
         'J': ('plan_year', 'prefilled'),
@@ -415,7 +415,8 @@ def _resolve_cell(key, source, prefilled, input_data, extras, stats, sc_row, fie
     """按 (key, source) 解析一个单元格的值。"""
     if source == 'prefilled':
         if key == 'subcompartment_orig':
-            # 小班原始值：GDB 原「小班」字段；无则回退调查小班号；数值化 "1.0"→1
+            # 小班：GDB 原值（可含汉字如「红9」，_fmt_num 转换失败原样保留）；
+            # 无「小班」字段时回退调查小班号；数值串 "1.0"→1
             val = prefilled.get('subcompartment_orig') or prefilled.get('subcompartment', '')
             return _fmt_num(val) if val not in ('', None) else ''
         if key == 'forest_compartment':
@@ -667,7 +668,8 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, data):
         except (ValueError, TypeError):
             return str(v or "").strip()
 
-    # 小班原始号（调查小班号≠小班时 GDB 导入保留原值；相同则即小班号本身）
+    # 小班原值：新导入读「小班」（GDB 原值，可含汉字）；旧数据兼容读「小班原始」；
+    # 均无回退调查小班号（相同则即调查小班号本身）
     orig_no = _int_like(gdb_data.get("小班原始") or gdb_data.get("小班")
                         or sc_row.get("subcompartment"))
     survey_no = _int_like(sc_row.get("subcompartment"))

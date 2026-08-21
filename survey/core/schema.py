@@ -46,8 +46,11 @@ SUBCOMPARTMENT_FIELD_MAP = {
     "县":         "county",              # 表1-4 县
     "村":         "village",             # 表1-5 村
     "林班":       "forest_compartment",  # 表1/3 林班（表2 封山育林 GDB 无此字段）
-    "小班":       "subcompartment",      # 表1-5 小班号（= 调查小班号）
-    "小班原始":   "subcompartment_orig", # GDB 原「小班」字段值（导入时保留，导出 小班 列用）
+    "小班":       "subcompartment_orig", # 小班：GDB 原值（可含汉字），仅导入/导出展示（F/G 列）
+    "调查小班号": "subcompartment",      # 调查小班号：数字业务键（排序/标签/文件名/select 等全局使用）
+    # 「小班原始」已废弃（2026-08-21）：与「小班」重复，新导入不再写入；
+    # 旧数据行仍含此键，保留映射兼容读取（排在「小班」后，旧值优先生效）。
+    "小班原始":   "subcompartment_orig",
     "土地权属":   "ownership",           # 表1-3 林地所有权
     "土地权":     "ownership",           # GDB 字段别名
     "林地所有权": "ownership",           # GDB 字段别名（直名）
@@ -233,7 +236,7 @@ TABLES = [
             {"key": "township", "label": "乡", "col": "D"},
             {"key": "village", "label": "村", "col": "E"},
             {"key": "forest_compartment", "label": "林班", "col": "F"},
-            {"key": "subcompartment_orig", "label": "小班(原始)", "col": "G"},
+            {"key": "subcompartment_orig", "label": "小班", "col": "G"},
             {"key": "check_type", "label": "验收类别", "col": "H"},
             {"key": "project_name", "label": "项目名称", "col": "I"},
             {"key": "plan_year", "label": "计划年度", "col": "J"},
@@ -283,7 +286,7 @@ TABLES = [
             {"key": "county", "label": "县", "col": "C"},
             {"key": "township", "label": "乡", "col": "D"},
             {"key": "village", "label": "村", "col": "E"},
-            {"key": "subcompartment_orig", "label": "小班(原始)", "col": "F"},
+            {"key": "subcompartment_orig", "label": "小班", "col": "F"},
             {"key": "check_type", "label": "验收类别", "col": "G"},
             {"key": "project_name", "label": "项目名称", "col": "H"},
             {"key": "plan_year", "label": "计划年度", "col": "I"},
@@ -349,7 +352,7 @@ TABLES = [
             {"key": "township", "label": "乡", "col": "D"},
             {"key": "village", "label": "村", "col": "E"},
             {"key": "forest_compartment", "label": "林班", "col": "F"},
-            {"key": "subcompartment_orig", "label": "小班(原始)", "col": "G"},
+            {"key": "subcompartment_orig", "label": "小班", "col": "G"},
             {"key": "check_type", "label": "验收类别", "col": "H"},
             {"key": "project_name", "label": "项目名称", "col": "I"},
             {"key": "plan_year", "label": "计划年度", "col": "J"},

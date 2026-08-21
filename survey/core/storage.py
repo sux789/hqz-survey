@@ -15,6 +15,7 @@ map_subcompartment_to_prefilled 从 subcompartment_rows 实时映射，不独立
 所有写入操作线程安全（SQLite check_same_thread=False + 全局锁）。
 """
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -40,6 +41,19 @@ def _to_uint(v):
     if f != f or f < 0:  # NaN 或负数
         return 0
     return int(f)
+
+
+def _derive_uint_with_digits(v):
+    """转 unsigned int；非数值（含汉字如「红9」）提取数字部分（红9→9）。
+
+    调查小班号推导专用：GDB「小班」含汉字时以数字部分作业务键，
+    原值（含汉字）保留在 data_json 供导出展示。无数字 → 0。
+    """
+    n = _to_uint(v)
+    if n:
+        return n
+    m = re.search(r"\d+", str(v or ""))
+    return int(m.group()) if m else 0
 
 
 def _connect():
@@ -73,6 +87,7 @@ def init_db():
                     inspector         TEXT DEFAULT '',
                     created_at        TEXT NOT NULL,
                     updated_at        TEXT NOT NULL,
+                    version           INTEGER NOT NULL DEFAULT 1,
                     FOREIGN KEY (project_id) REFERENCES projects(id),
                     UNIQUE(project_id, table_id, subcompartment_id)
                 );
@@ -166,6 +181,7 @@ def init_db():
                             inspector         TEXT DEFAULT '',
                             created_at        TEXT NOT NULL,
                             updated_at        TEXT NOT NULL,
+                            version           INTEGER NOT NULL DEFAULT 1,
                             FOREIGN KEY (project_id) REFERENCES projects(id),
                             UNIQUE(project_id, table_id, subcompartment_id)
                         );
@@ -196,6 +212,7 @@ def init_db():
                             inspector         TEXT DEFAULT '',
                             created_at        TEXT NOT NULL,
                             updated_at        TEXT NOT NULL,
+                            version           INTEGER NOT NULL DEFAULT 1,
                             FOREIGN KEY (project_id) REFERENCES projects(id),
                             UNIQUE(project_id, table_id, subcompartment_id)
                         );
@@ -203,6 +220,11 @@ def init_db():
             # records 索引（新库或已迁移库才创建；旧库迁移块内已建）
             conn.execute("CREATE INDEX IF NOT EXISTS idx_records_project_table ON records(project_id, table_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_records_subcompartment ON records(subcompartment_id)")
+            # records 乐观锁版本列（并发编辑冲突检测，2026-08-21）：老库补列，存量行默认 1
+            try:
+                conn.execute("ALTER TABLE records ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            except sqlite3.OperationalError:
+                pass
             # 旧 prefilled 表停用删除（预填数据统一由 map_subcompartment_to_prefilled 实时映射）
             conn.execute("DROP TABLE IF EXISTS prefilled")
             # subcompartment_rows 新增 GDB 关联列（已有库兼容）
@@ -339,7 +361,34 @@ def get_project(pid):
 # 从 subcompartment_rows.data_json 实时映射。
 
 
-def upsert_survey_row(pid, table_id, subcompartment_id, data, inspector=""):
+class RecordConflict(Exception):
+    """乐观锁冲突：记录已被他人修改后保存（携带当前最新记录供前端展示/合并）。
+
+    upsert_survey_row 带 base_version 版本检查失败时抛出；
+    API 层捕获后返回 409 + conflict（当前 data/version/inspector/updated_at）。
+    """
+
+    def __init__(self, record):
+        self.record = record
+        super().__init__("记录已被他人修改")
+
+
+def _record_from_row(r):
+    """records 行 → record dict（含 version）。"""
+    return {
+        "id": r["id"],
+        "project_id": r["project_id"],
+        "table_id": r["table_id"],
+        "subcompartment_id": r["subcompartment_id"],
+        "data": json.loads(r["data_json"]),
+        "inspector": r["inspector"],
+        "created_at": r["created_at"],
+        "updated_at": r["updated_at"],
+        "version": r["version"],
+    }
+
+
+def upsert_survey_row(pid, table_id, subcompartment_id, data, inspector="", base_version=None):
     """小班单行 upsert：每小班每表一行，有则更新 data_json，无则插入。
 
     Args:
@@ -348,39 +397,89 @@ def upsert_survey_row(pid, table_id, subcompartment_id, data, inspector=""):
         subcompartment_id: 小班行 ID（subcompartment_rows.id）
         data: 该行所有 input 字段值的 dict
         inspector: 验收人
+        base_version: 乐观锁版本号（读取记录时返回的 version）：
+            None → 不做版本检查（兼容旧客户端/内部调用，最后写入者胜）
+            0    → 记录必须尚不存在（首次创建竞态防护：已存在即冲突）
+            >=1  → CAS 更新：仅当库内 version == base_version 才写入
 
     Returns:
-        record dict
+        record dict（含写入后的新 version）
+
+    Raises:
+        RecordConflict: 版本检查失败（record 属性携带库内当前最新记录）
     """
     now = datetime.now().isoformat(timespec="seconds")
     data_str = json.dumps(data, ensure_ascii=False)
     with _lock:
         conn = _connect()
         try:
-            # 用 INSERT ... ON CONFLICT 原子 upsert，避免先 SELECT 再改的并发竞态
             rid = uuid.uuid4().hex[:12]
-            conn.execute(
-                """INSERT INTO records (id, project_id, table_id, subcompartment_id,
-                   data_json, inspector, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?)
-                   ON CONFLICT(project_id, table_id, subcompartment_id) DO UPDATE SET
-                     data_json=excluded.data_json,
-                     inspector=excluded.inspector,
-                     updated_at=excluded.updated_at""",
-                (rid, pid, table_id, subcompartment_id, data_str, inspector, now, now),
-            )
-            # 取实际生效的 id（冲突时为原 id）
+            if base_version is None:
+                # 兼容模式：原子 upsert，最后写入者胜（版本仍递增）
+                conn.execute(
+                    """INSERT INTO records (id, project_id, table_id, subcompartment_id,
+                       data_json, inspector, created_at, updated_at, version)
+                       VALUES (?,?,?,?,?,?,?,?,1)
+                       ON CONFLICT(project_id, table_id, subcompartment_id) DO UPDATE SET
+                         data_json=excluded.data_json,
+                         inspector=excluded.inspector,
+                         updated_at=excluded.updated_at,
+                         version=records.version+1""",
+                    (rid, pid, table_id, subcompartment_id, data_str, inspector, now, now),
+                )
+            elif base_version == 0:
+                # 首次创建：记录必须不存在（他人在我读取之后先创建了 → 冲突）
+                cur = conn.execute(
+                    """INSERT INTO records (id, project_id, table_id, subcompartment_id,
+                       data_json, inspector, created_at, updated_at, version)
+                       VALUES (?,?,?,?,?,?,?,?,1)
+                       ON CONFLICT(project_id, table_id, subcompartment_id) DO NOTHING""",
+                    (rid, pid, table_id, subcompartment_id, data_str, inspector, now, now),
+                )
+                if cur.rowcount == 0:
+                    row = conn.execute(
+                        "SELECT * FROM records WHERE project_id=? AND table_id=? AND subcompartment_id=?",
+                        (pid, table_id, subcompartment_id),
+                    ).fetchone()
+                    conn.rollback()
+                    raise RecordConflict(_record_from_row(row) if row else None)
+            else:
+                # CAS 更新：版本匹配才写入（不匹配 = 他人已先保存）
+                cur = conn.execute(
+                    """UPDATE records SET data_json=?, inspector=?, updated_at=?, version=version+1
+                       WHERE project_id=? AND table_id=? AND subcompartment_id=? AND version=?""",
+                    (data_str, inspector, now, pid, table_id, subcompartment_id, base_version),
+                )
+                if cur.rowcount == 0:
+                    row = conn.execute(
+                        "SELECT * FROM records WHERE project_id=? AND table_id=? AND subcompartment_id=?",
+                        (pid, table_id, subcompartment_id),
+                    ).fetchone()
+                    if row is None:
+                        # 记录不存在（项目重建等极罕见场景）→ 按新建写入
+                        conn.execute(
+                            """INSERT INTO records (id, project_id, table_id, subcompartment_id,
+                               data_json, inspector, created_at, updated_at, version)
+                               VALUES (?,?,?,?,?,?,?,?,1)""",
+                            (rid, pid, table_id, subcompartment_id, data_str, inspector, now, now),
+                        )
+                    else:
+                        conn.rollback()
+                        raise RecordConflict(_record_from_row(row))
+            # 取实际生效的行（返回写入后的完整记录，含新 version）
             row = conn.execute(
-                "SELECT id FROM records WHERE project_id=? AND table_id=? AND subcompartment_id=?",
+                "SELECT * FROM records WHERE project_id=? AND table_id=? AND subcompartment_id=?",
                 (pid, table_id, subcompartment_id),
             ).fetchone()
-            rid = row["id"] if row else rid
             conn.commit()
+            rec = _record_from_row(row) if row else {
+                "id": rid, "project_id": pid, "table_id": table_id,
+                "subcompartment_id": subcompartment_id, "data": data,
+                "inspector": inspector, "updated_at": now, "version": 1,
+            }
         finally:
             conn.close()
-    return {"id": rid, "project_id": pid, "table_id": table_id,
-            "subcompartment_id": subcompartment_id, "data": data,
-            "inspector": inspector, "updated_at": now}
+    return rec
 
 
 def get_survey_rows(pid, table_id, project_name=None):
@@ -392,7 +491,7 @@ def get_survey_rows(pid, table_id, project_name=None):
         project_name: 可选，按项目名称过滤（仅返回该项目名称下的小班调查行）
 
     Returns:
-        list[dict]：每项含 id/subcompartment_id/data/inspector/updated_at
+        list[dict]：每项含 id/subcompartment_id/data/inspector/updated_at/version
     """
     conn = _connect()
     try:
@@ -421,6 +520,7 @@ def get_survey_rows(pid, table_id, project_name=None):
                 "data": json.loads(r["data_json"]),
                 "inspector": r["inspector"],
                 "updated_at": r["updated_at"],
+                "version": r["version"],
             })
         return result
     finally:
@@ -1241,24 +1341,25 @@ def import_gdb_subcompartments(gid, project_id, gdb_path, layer=None, layer_meta
                     f_area = G._pick_candidate(props, f_area_cands)
                     f_fid = G._pick_candidate(props, f_fid_cands)
 
-                    # 林班/小班规范化为 unsigned int（根治 "1.0" 问题）
-                    forest_compartment = _to_uint(props.get(f_for, "")) if f_for else 0
-                    subcompartment = _to_uint(props.get(f_sub, "")) if f_sub else 0
-                    if f_for:
-                        props["林班"] = forest_compartment
-                    if f_sub:
-                        # 小班号取调查小班号（别名优先级）时，保留 GDB 原「小班」值
-                        # 供导出 G 列使用（调查小班号 ≠ 小班，两者都要展示）
-                        if f_sub != "小班":
-                            orig = str(props.get("小班", "") or "").strip()
-                            if orig and orig not in ("None", "nan"):
-                                props["小班原始"] = orig
-                        props["小班"] = subcompartment
-
-                    # 提取定位字段
+                    # 提取定位字段（须在写回规范化「调查小班号」之前取原值，
+                    # feature_id 候选别名含「调查小班号」，保持原样存储）
                     township = props.get(f_town, "") if f_town else ""
                     village = props.get(f_vill, "") if f_vill else ""
                     gdb_feature_id = props.get(f_fid, "") if f_fid else ""
+
+                    # 林班规范化为 unsigned int（根治 "1.0" 问题）
+                    forest_compartment = _to_uint(props.get(f_for, "")) if f_for else 0
+                    if f_for:
+                        props["林班"] = forest_compartment
+
+                    # 调查小班号（数字，全局业务键：排序/标签/文件名/select）：
+                    # 按别名优先级取值转 uint；非数值（含汉字如「红9」）提取数字
+                    # 部分；规范化写回 data_json 供 prefilled 映射（B 列）。
+                    # 「小班」保留 GDB 原值（可含汉字）原样不动，仅导出 F/G 列
+                    # 展示；不再覆写、不再另存「小班原始」（已废弃，与「小班」重复）。
+                    subcompartment = _derive_uint_with_digits(props.get(f_sub, "")) if f_sub else 0
+                    if f_sub:
+                        props["调查小班号"] = subcompartment
 
                     if not subcompartment:
                         skipped += 1

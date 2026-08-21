@@ -376,7 +376,12 @@ def api_get_survey_rows(pid, table_id):
 def api_upsert_survey_row(pid, table_id):
     """upsert 一个小班的一行调查数据（网格单元格编辑触发）。
 
-    Body: {"subcompartment_id": "...", "data": {字段: 值}, "inspector": "..."}
+    Body: {"subcompartment_id": "...", "data": {字段: 值}, "inspector": "...",
+           "base_version": N}
+    base_version（乐观锁，可选）：读取记录时返回的 version；
+      缺省=不检查（兼容旧客户端）；0=记录须不存在；>=1=版本匹配才写入。
+    版本不匹配 → 409 + conflict（库内当前 data/version/inspector/updated_at），
+    前端弹「已被他人修改」窗提供 合并/覆盖/加载最新。
     """
     body = request.get_json(force=True) or {}
     sc_id = body.get("subcompartment_id", "")
@@ -385,7 +390,25 @@ def api_upsert_survey_row(pid, table_id):
         return jsonify({"error": "subcompartment_id 不能为空"}), 400
     u = A.current_user(FOREST_DB, LOCAL_DEV, LOCAL_USER)
     inspector = body.get("inspector", "") or u["username"]
-    rec = storage.upsert_survey_row(pid, table_id, sc_id, data, inspector)
+    bv = body.get("base_version")
+    try:
+        bv = None if bv is None else int(bv)
+    except (TypeError, ValueError):
+        bv = None
+    try:
+        rec = storage.upsert_survey_row(pid, table_id, sc_id, data, inspector,
+                                        base_version=bv)
+    except storage.RecordConflict as e:
+        cur = e.record or {}
+        return jsonify({
+            "error": "该小班数据已被他人修改，请合并或覆盖后重试",
+            "conflict": {
+                "version": cur.get("version", 1),
+                "data": cur.get("data", {}),
+                "inspector": cur.get("inspector", ""),
+                "updated_at": cur.get("updated_at", ""),
+            },
+        }), 409
     return jsonify(rec)
 
 
