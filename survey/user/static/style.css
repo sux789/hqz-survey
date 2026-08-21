@@ -599,11 +599,28 @@ input, select, textarea, button {
 .samples-bar-info { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .samples-bar-info b { font-size: 15px; }
 .samples-bar-info small { color: var(--text-2); font-size: 12px; }
-.samples-stat { font-size: 12px; color: var(--text-2); }
 .samples-bar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .sm-save-state { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+
+/* 统计行：自动计算项转纯文本（不可输入），紧凑展示在信息条下方 */
+.sm-stats-line {
+  flex-shrink: 0;
+  display: flex; align-items: baseline; flex-wrap: wrap;
+  gap: 2px 12px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--text-2);
+}
+.sm-stats-line .sm-stat-item { white-space: nowrap; }
+.sm-stats-line b { color: var(--text); font-weight: 700; font-size: 13px; }
+
+/* 滚动区：样地列表 + 汇总表单（可输入项在列表最下面，随列表滚动） */
+.samples-scroll {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
 .samples-list {
-  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
   padding: 10px 12px 12px;
   display: flex; flex-direction: column; gap: 10px;
 }
@@ -628,24 +645,16 @@ input, select, textarea, button {
 .field-sm .f-input { width: 100%; box-sizing: border-box; min-height: 38px; }
 .input-error { border-color: #e53935 !important; box-shadow: 0 0 0 2px rgba(229, 57, 53, .15); }
 
-/* ── 样地页汇总区（模板 R27-R39 对应字段）── */
+/* ── 样地页汇总表单（可输入项，滚动区内列表最下方）── */
 .sm-summary {
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   background: var(--panel);
-  padding: 8px 12px;
+  padding: 10px 12px 14px;
 }
-.sm-sum-stats {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  gap: 6px; margin-bottom: 8px;
+.sm-sum-title {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  margin-bottom: 8px;
 }
-.sm-sum-stat {
-  border: 1px solid var(--border); border-radius: 8px;
-  background: var(--panel-2, #fafafa);
-  padding: 4px 8px; min-width: 0;
-}
-.sm-sum-stat label { display: block; font-size: 11px; color: var(--text-2); white-space: nowrap; }
-.sm-sum-stat b { font-size: 15px; word-break: break-all; }
 .sm-sum-form {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px;

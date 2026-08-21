@@ -2840,8 +2840,9 @@ async function openSamplesPage() {
 }
 
 // 样地管理页（页面级布局，卡片不压缩）
-// 布局顺序：信息条 → 汇总区 → 样地列表（滚动区）→ 添加按钮（固定底部，
-// 列表在按钮前面，避免卡片被上方控件挤压遮挡）
+// 布局顺序：信息条 → 统计行（自动计算项转文本，紧凑不占空间）→
+// 滚动区（样地列表 + 汇总表单在列表最下面）→「+添加样地」按钮（底部）。
+// 可输入控件不占列表上方空间，避免样地卡片被遮挡。
 function renderSamplesPage() {
   const sc = state.gridSubcompartment;
   if (!sc) {
@@ -2850,27 +2851,25 @@ function renderSamplesPage() {
   }
   return `<div class="page-samples">
     <div class="samples-bar" id="samplesBar">${renderSamplesBarInner()}</div>
-    <div class="sm-summary" id="smSummary">${renderSamplesSummaryInner()}</div>
-    <div class="samples-list" id="samplesList">${renderSamplesListInner()}</div>
+    <div class="sm-stats-line" id="smStatsLine">${renderSamplesStatsInner()}</div>
+    <div class="samples-scroll">
+      <div class="samples-list" id="samplesList">${renderSamplesListInner()}</div>
+      <div class="sm-summary" id="smSummary">${renderSamplesSummaryInner()}</div>
+    </div>
     <button class="btn-sample-add sm-add-btn" data-action="sm-add">+ 添加样地</button>
   </div>`;
 }
 
 function bindSamplesPage() { /* 事件全部走全局委托 */ }
 
-// 顶部信息条：小班信息 + 添加按钮 + 统计 + 保存状态
+// 顶部信息条：小班信息 + 保存状态/按钮（统计已移至下方统计行）
 function renderSamplesBarInner() {
   const sc = state.gridSubcompartment;
-  const samples = smSamples() || [];
   const loc = [sc.township, sc.village].filter(Boolean).join(' ');
-  let planted = 0, alive = 0;
-  samples.forEach(s => { if (s) { planted += Number(s.planted) || 0; alive += Number(s.alive) || 0; } });
-  const rate = planted ? (alive / planted * 100).toFixed(2) + '%' : '--';
   return `
     <div class="samples-bar-info">
       <b>小班 ${escapeHtml(sc.subcompartment_label || '')}</b>
       ${loc ? `<small>${escapeHtml(loc)}</small>` : ''}
-      <span class="samples-stat">共 ${samples.length} 个样地 · 查数株数 ${planted} · 合格率 ${rate}</span>
     </div>
     <div class="samples-bar-actions">
       <span class="sm-save-state ${_smDirty ? 'sm-unsaved' : 'sm-saved'}" id="smSaveState">${_smDirty ? '● 未保存' : '✓ 已保存'}</span>
@@ -2945,27 +2944,34 @@ function smSummaryComputed() {
   const gArea = Number(d.sm_grid_area) || 0;
   const gCount = Number(d.sm_grid_count) || 0;
   const total = (n > 0 && planted > 0) ? Math.round(planted / n / 150 * gArea * gCount) : null;
-  return { n, area, planted, alive, rate, total };
+  return { n, realN, area, planted, alive, rate, total };
 }
 
+// 统计行：自动计算项转纯文本（不可输入，紧凑展示在信息条下方，
+// 与可输入的汇总表单分离，避免输入控件挤占样地列表空间）
+function renderSamplesStatsInner() {
+  const c = smSummaryComputed();
+  const st = (label, val, key, suffix = '') =>
+    `<span class="sm-stat-item">${label} <b data-sm-sum-val="${key}">${escapeHtml(String(val))}</b>${suffix}</span>`;
+  return `
+    <span class="sm-stat-item">共 <b data-sm-sum-val="realN">${c.realN}</b> 个样地</span>
+    ${st('总样地面积', c.area, 'area', '㎡')}
+    ${st('样地总株数', c.planted, 'planted')}
+    ${st('样地成活株数', c.alive, 'alive')}
+    ${st('样地成活率', c.rate == null ? '--' : (c.rate * 100).toFixed(2) + '%', 'rate')}
+    ${st('调查总株数', c.total == null ? '--' : c.total, 'total')}`;
+}
+
+// 汇总表单（可输入项，放在样地列表最下面、随列表滚动）
 function renderSamplesSummaryInner() {
   const sc = state.gridSubcompartment;
   if (!sc) return '';
   smSummaryDefaults();
   const d = state._gridSurveyMap[sc.id] || {};
-  const c = smSummaryComputed();
-  const stat = (label, val, key) =>
-    `<div class="sm-sum-stat"><label>${label}</label><b data-sm-sum-val="${key}">${escapeHtml(String(val))}</b></div>`;
   const inp = (label, key, type, attrs = '') =>
     `<div class="sm-sum-field"><label>${label}</label><input type="${type}" class="f-input" data-sm-sum="${key}" value="${escapeHtml(d[key] != null ? d[key] : '')}" ${attrs}></div>`;
   return `
-    <div class="sm-sum-stats">
-      ${stat('总样地面积(㎡)', c.area, 'area')}
-      ${stat('样地总株数', c.planted, 'planted')}
-      ${stat('样地成活株数', c.alive, 'alive')}
-      ${stat('样地成活率', c.rate == null ? '--' : (c.rate * 100).toFixed(2) + '%', 'rate')}
-      ${stat('调查总株数', c.total == null ? '--' : c.total, 'total')}
-    </div>
+    <div class="sm-sum-title">汇总信息</div>
     <div class="sm-sum-form">
       ${inp('总样地个数', 'sm_total_count', 'number', 'min="0" step="1" inputmode="numeric"')}
       ${inp('单个网格面积(㎡)', 'sm_grid_area', 'number', 'min="0" step="any" inputmode="decimal"')}
@@ -2997,11 +3003,12 @@ function onSmSummaryInput(t) {
   smScheduleSave();
 }
 
-// 只刷新 5 个计算值（不重渲染表单，避免输入焦点丢失）
+// 只刷新统计行 6 个计算值（不重渲染表单，避免输入焦点丢失）
 function updateSmSummaryComputed() {
-  if (!qs('#smSummary') || !state.gridSubcompartment) return;
+  if (!qs('#smStatsLine') || !state.gridSubcompartment) return;
   const c = smSummaryComputed();
   const set = (k, v) => { const el = qs(`[data-sm-sum-val="${k}"]`); if (el) el.textContent = v; };
+  set('realN', c.realN);
   set('area', c.area);
   set('planted', c.planted);
   set('alive', c.alive);
