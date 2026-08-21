@@ -6,15 +6,16 @@
   - 基本信息：tpl/tpl-base.xlsx（2023年度官方模板，sheet=2023年度人工造林/封山育林/退化林，预填示例）；导出前清空数据区再填值
   - 样地：tpl/tpl-samples.xlsx 块结构（39 行/块）；每分类一个 sheet，每小班一块向下复制；导出前清空块1示例
   - 样地统计（苗木合格率组，表1 AN/AO/AP；表2 BE/BF/BG；表3 AS/AT/AU）：
-      小班查数株数 = Σ样地种植株数（与样地模板 B30 同口径，
-                     不依赖「单个网格面积×种植网格数量」）
+      小班查数株数 = 调查总株数（与样地模板 B34 同口径）
+                     = round(Σ种植÷个数÷150×单个网格面积×种植网格数量)，
+                     个数 = 手写 sm_total_count（>0 生效）回退实际样地数
       合格率      = Σ成活÷Σ种植×100（写数值如 95.24）
       合格株树    = round(查数株数×合格率÷100)
   - 手写签字导出为图片：签字 canvas 存 data_json（inspector_sign /
     co_inspector_sign，PNG data URL），导出时裁白边+等比缩放后以图片
     插入签字列（表1 AR/AU、表2 BI/BL、表3 AV/AY）
-  - 其余手写项不录入：总样地个数、单个网格面积、种植网格数量、
-    撑杆/覆膜/备注（样地模板 I 列标「手写」行）→ 导出留空
+  - 样地页汇总手写项（sm_* 键）写入样地模板 B27-B39（个数/网格面积/数量/
+    撑杆/覆膜/验收人/验收日期/备注）；样地行备注（sample.remark）写 I 列
   - 死亡株数 = 样地模板 E 列公式（种植-成活）自动算，不录入
   - 数据行按（林班, 调查小班号）数字序
 """
@@ -126,7 +127,7 @@ _TPL_COL_MAPS = {
         'AK': ('protect_rate', 'input'),
         'AL': ('tend_area', 'input'),
         'AM': ('tend_rate', 'input'),
-        'AN': ('planted_total', 'sample_stat'),     # 小班查数株数 = Σ样地种植株数
+        'AN': ('planted_total', 'sample_stat'),     # 小班查数株数 = 调查总株数（B34 口径）
         'AO': ('qualified_count', 'sample_stat'),   # 合格株树 = 查数株数×合格率
         'AP': ('qualified_rate', 'sample_stat'),    # 合格率 = Σ成活/Σ种植×100
         'AQ': ('design_count', 'prefilled'),        # 小班设计株树（GDB 小班设计株树/需苗量）
@@ -196,7 +197,7 @@ _TPL_COL_MAPS = {
         'BB': ('protect_rate', 'input'),
         'BC': ('tend_area', 'input'),
         'BD': ('tend_rate', 'input'),
-        'BE': ('planted_total', 'sample_stat'),     # 小班查数株数
+        'BE': ('planted_total', 'sample_stat'),     # 小班查数株数 = 调查总株数（B34 口径）
         'BF': ('qualified_count', 'sample_stat'),   # 合格株树
         'BG': ('qualified_rate', 'sample_stat'),    # 合格率
         'BH': ('design_count', 'prefilled'),        # 小班设计株树（GDB 绿色）
@@ -253,7 +254,7 @@ _TPL_COL_MAPS = {
         'AO': ('protect_rate', 'input'),
         'AP': ('tend_area', 'input'),
         'AQ': ('tend_rate', 'input'),
-        'AR': ('planted_total', 'sample_stat'),     # 小班查数株数
+        'AR': ('planted_total', 'sample_stat'),     # 小班查数株数 = 调查总株数（B34 口径）
         'AS': ('qualified_count', 'sample_stat'),   # 合格株树
         'AT': ('qualified_rate', 'sample_stat'),    # 合格率
         'AU': ('design_count', 'prefilled'),        # 小班设计株树（GDB 绿色）
@@ -345,27 +346,55 @@ def _fmt_num(val):
     return round(num, 2)
 
 
-def _sample_stats(samples):
-    """样地聚合统计（苗木合格率组）。
+def _sample_stats(data):
+    """样地聚合统计（苗木合格率组），口径与样地页汇总/模板 B34 一致。
 
-    小班查数株数 = Σ种植株数（样地模板 B30 同口径）
+    小班查数株数 = 调查总株数 = round(Σ种植 ÷ 个数 ÷ 150 × 单个网格面积 × 种植网格数量)
+                  个数 = 手写 sm_total_count（>0 生效）回退实际样地数；
+                  个数或Σ种植为 0 → 空（同模板 IF(OR(B27=0,B29=0),"",…) 守卫），
+                  网格面积/数量未填 → 结果为 0（同模板 B32/B33 空参与乘法）
     合格率      = Σ成活÷Σ种植×100（数值如 95.24）
     合格株树    = round(查数株数×合格率÷100)
     """
-    planted = 0
-    alive = 0
+    data = data if isinstance(data, dict) else {}
+    samples = data.get("samples")
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    planted = 0.0
+    alive = 0.0
+    real_n = 0
     for s in samples if isinstance(samples, list) else []:
         if not isinstance(s, dict):
             continue
-        planted += _num(s.get("planted"))
-        alive += _num(s.get("alive"))
+        real_n += 1
+        planted += _f(s.get("planted"))
+        alive += _f(s.get("alive"))
     if not planted:
         return {"planted_total": None, "qualified_count": None, "qualified_rate": None}
     rate = round(alive / planted * 100, 2)
+    # 个数：手写 sm_total_count 优先（与 B27/前端 smSummaryComputed 同口径）
+    n = None
+    hand_n = data.get("sm_total_count")
+    if hand_n not in ("", None):
+        try:
+            hf = float(hand_n)
+            if hf > 0:
+                n = int(round(hf))
+        except (ValueError, TypeError):
+            n = None
+    if n is None:
+        n = real_n
+    total = round(planted / n / 150 * _f(data.get("sm_grid_area"))
+                  * _f(data.get("sm_grid_count"))) if n > 0 else None
     return {
-        "planted_total": planted,
+        "planted_total": total,
         "qualified_rate": rate,
-        "qualified_count": round(planted * rate / 100),
+        "qualified_count": round(total * rate / 100) if total is not None else None,
     }
 
 
@@ -553,8 +582,7 @@ def export_base(pid, output_path=None, category=None):
             row_num = _BASE_DATA_START + i
             prefilled = S.map_subcompartment_to_prefilled(sc_row.get("data", {}))
             input_data = survey_map.get(sc_row["id"], {}) or {}
-            samples = input_data.get("samples", [])
-            stats_v = _sample_stats(samples)
+            stats_v = _sample_stats(input_data)
             extras = storage.get_extras(sc_row["id"]) if need_extra else None
             for col_letter, (key, source) in _TPL_COL_MAPS[table_id].items():
                 val = _resolve_cell(key, source, prefilled, input_data,
@@ -692,6 +720,10 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, data):
             names = [str(p) for p in (photos if isinstance(photos, list) else [photos]) if p]
             if names:
                 ws.cell(row=r, column=8, value=";".join(names))
+        # 样地备注（I 列，文本；样地页卡片成活株数后的「备注」输入框）
+        rv = s.get("remark")
+        if rv not in ('', None):
+            ws.cell(row=r, column=9, value=str(rv))
 
     # 总样地个数（B27）：优先手写值（样地页汇总表单 sm_total_count，前端默认
     # 自动填充实际样地数、手改后以用户值为准；与前端 smSummaryComputed 同口径：
@@ -743,9 +775,9 @@ def _clear_sample_template_block(ws):
         if m.min_row >= _SAMPLE_DATA_START and m.max_row < _SAMPLE_DATA_START + _SAMPLE_DATA_SLOTS:
             ws.unmerge_cells(start_row=m.min_row, start_column=m.min_col,
                              end_row=m.max_row, end_column=m.max_col)
-    # 样地槽（行4-26）整行 A-H 清空
+    # 样地槽（行4-26）整行 A-I 清空（I 列为样地备注，2026-08-21 起录入导出）
     for r in range(_SAMPLE_DATA_START, _SAMPLE_DATA_START + _SAMPLE_DATA_SLOTS):
-        for c in range(1, 9):  # A-H
+        for c in range(1, 10):  # A-I
             ws.cell(row=r, column=c).value = None
     # 手写项残留清理：总样地个数(R27 B)/单个网格面积(R32 B)/种植网格数量(R33 B)
     for r in (27, 32, 33):

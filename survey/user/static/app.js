@@ -962,26 +962,36 @@ async function loadGridSubcompartmentData() {
 }
 
 // 公式计算：根据 formula 名和数据计算 computed 字段值
-// 样地统计（与导出端 _sample_stats 同口径）：
-//   查数株数 = Σ种植株数；合格率 = Σ成活÷Σ种植×100（保留2位）；合格株树 = round(查数株数×合格率÷100)
+// 样地统计（与导出端 _sample_stats / 样地页 smSummaryComputed 同口径）：
+//   查数株数 = 调查总株数（样地模板 B34 同口径）
+//            = round(Σ种植 ÷ 个数 ÷ 150 × 网格面积 × 网格数量)，
+//            个数 = 手写 sm_total_count（>0 生效）回退实际样地数
+//   合格率 = Σ成活÷Σ种植×100（保留2位）；合格株树 = round(查数株数×合格率÷100)
 function computeFieldValue(formula, data) {
   const samples = data && Array.isArray(data.samples) ? data.samples : [];
-  let planted = 0, alive = 0;
+  let planted = 0, alive = 0, realN = 0;
   samples.forEach(s => {
     if (!s) return;
+    realN++;
     planted += Number(s.planted) || 0;
     alive += Number(s.alive) || 0;
   });
+  const handN = Number(data && data.sm_total_count);
+  const n = (handN > 0) ? handN : realN;
+  const gArea = Number(data && data.sm_grid_area) || 0;
+  const gCount = Number(data && data.sm_grid_count) || 0;
+  // 查数株数 = 调查总株数（B34 守卫：个数或Σ种植为 0 → 空；网格未填时结果为 0，同模板）
+  const total = (n > 0 && planted > 0) ? Math.round(planted / n / 150 * gArea * gCount) : null;
   switch (formula) {
     case 's_planted_total':
-      return planted || '';
+      return total || '';
     case 's_qualified_rate':
       if (!planted) return '';
       return (Math.round(alive / planted * 10000) / 100).toFixed(2);
     case 's_qualified_count': {
-      if (!planted) return '';
+      if (!total || !planted) return '';
       const rate = Math.round(alive / planted * 10000) / 100;
-      return Math.round(planted * rate / 100) || '';
+      return Math.round(total * rate / 100) || '';
     }
     default: return '';
   }
@@ -3039,9 +3049,12 @@ function renderSamplesListInner() {
     const isLast = i === samples.length - 1;  // 数组最后一个（倒序显示在最底部）
     const fieldsHtml = fieldDefs.map(sf => {
       const v = s[sf.key] != null ? s[sf.key] : '';
+      // 备注（text 类型）渲染文本框，其余数值框；顺序上备注在成活株数后、死亡株数提示前
+      const isText = sf.type === 'text';
+      const numAttrs = isText ? '' : ' step="any" inputmode="decimal" min="0"';
       return `<div class="field field-sm">
         <label>${escapeHtml(sf.label)}</label>
-        <input type="number" step="any" inputmode="decimal" min="0" class="f-input" data-sm-idx="${i}" data-sm-field="${sf.key}" value="${escapeHtml(v)}">
+        <input type="${isText ? 'text' : 'number'}"${numAttrs} class="f-input" data-sm-idx="${i}" data-sm-field="${sf.key}" value="${escapeHtml(v)}">
       </div>`;
     }).join('');
     // 死亡株数提示（种植−成活，只读；导出由模板 E 列公式计算）
@@ -3682,8 +3695,9 @@ app.addEventListener('input', (e) => {
     const idx = Number(t.dataset.smIdx);
     if (samples && samples[idx]) {
       let v = t.value;
-      // 不能为负数：即时去掉负号（min=0 已挡步进器，这里挡手动键入）
-      if (v !== '' && Number(v) < 0) {
+      // 不能为负数：即时去掉负号（min=0 已挡步进器，这里挡手动键入）；
+      // 仅数值输入框拦截——备注（type=text）等文本字段允许任意字符
+      if (t.type === 'number' && v !== '' && Number(v) < 0) {
         v = String(v).replace(/-/g, '');
         t.value = v;
         toast('填写数据不能为负数', 1800);

@@ -115,7 +115,7 @@ def sample_data(sample_project):
         "inspect_time": "2026-08-10",
         "samples": [
             {"no": 1, "area": 100, "planted": 100, "alive": 90,
-             "x": 102.123456, "y": 25.654321},
+             "x": 102.123456, "y": 25.654321, "remark": "坡上部"},
             {"no": 2, "area": 100, "planted": 100, "alive": 85, "x": 102.2, "y": 25.6},
         ],
         "sm_grid_area": "5000",
@@ -130,20 +130,41 @@ def sample_data(sample_project):
 
 
 class TestSampleStats:
+    """查数株数 = 调查总株数（B34 口径）：round(Σ种植÷个数÷150×网格面积×网格数量)。"""
+
+    BASE = {"samples": [
+        {"planted": 100, "alive": 90},
+        {"planted": 100, "alive": 85},
+    ]}
+
     def test_stats_formula(self):
-        """合格率 = Σ成活÷Σ种植×100（数值），合格株树 = round(查数×率)。"""
-        stats = exporter._sample_stats([
-            {"planted": 100, "alive": 90},
-            {"planted": 100, "alive": 85},
-        ])
-        assert stats["planted_total"] == 200
+        """网格 5000×4、实际个数 2：查数=13333，率=87.5，合格=11666。"""
+        stats = exporter._sample_stats(
+            dict(self.BASE, sm_grid_area="5000", sm_grid_count="4"))
+        assert stats["planted_total"] == 13333
         assert stats["qualified_rate"] == 87.5
-        assert stats["qualified_count"] == 175
+        assert stats["qualified_count"] == 11666
+
+    def test_stats_manual_count(self):
+        """手写个数 sm_total_count=5 优先：查数=5333，合格=4666。"""
+        stats = exporter._sample_stats(
+            dict(self.BASE, sm_grid_area="5000", sm_grid_count="4",
+                 sm_total_count="5"))
+        assert stats["planted_total"] == 5333
+        assert stats["qualified_count"] == 4666
+
+    def test_stats_no_grid(self):
+        """网格未填（同模板 B32/B33 空参与乘法）：查数=0，合格=0，率不变。"""
+        stats = exporter._sample_stats(dict(self.BASE))
+        assert stats["planted_total"] == 0
+        assert stats["qualified_rate"] == 87.5
+        assert stats["qualified_count"] == 0
 
     def test_stats_empty(self):
-        stats = exporter._sample_stats([])
+        stats = exporter._sample_stats({})
         assert stats["planted_total"] is None
         assert stats["qualified_rate"] is None
+        assert stats["qualified_count"] is None
 
 
 class TestExportBase:
@@ -180,9 +201,9 @@ class TestExportBase:
         ws = wb["2023年度人工造林"]
         # sc1 在行6：O 成活率 85
         assert ws.cell(row=6, column=15).value == 85
-        # AN 查数株数 = 200，AO 合格株树 175，AP 合格率 87.5
-        assert ws.cell(row=6, column=40).value == 200
-        assert ws.cell(row=6, column=41).value == 175
+        # AN 查数株数 = 调查总株数 13333（B34 口径），AO 合格株树 11666，AP 合格率 87.5
+        assert ws.cell(row=6, column=40).value == 13333
+        assert ws.cell(row=6, column=41).value == 11666
         assert ws.cell(row=6, column=42).value == 87.5
         # AT 备注
         assert ws.cell(row=6, column=46).value == "测试备注"
@@ -341,6 +362,9 @@ class TestExportSamples:
         assert ws.cell(row=43, column=4).value == 90
         # 死亡株数公式（E 列）
         assert ws.cell(row=43, column=5).value == "=C43-D43"
+        # 样地备注（I 列）；样地2 无备注 → 空
+        assert ws.cell(row=43, column=9).value == "坡上部"
+        assert ws.cell(row=44, column=9).value in (None, "")
 
     def test_summary_fields(self, sample_data):
         """汇总区 R27-R39：个数/手写项写入，公式带除0守卫并按块偏移。"""

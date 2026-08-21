@@ -186,13 +186,15 @@ _SAMPLES_FIELD = {
         {"key": "area", "label": "样地面积(平方米)", "type": "number", "required": False},
         {"key": "planted", "label": "种植株数", "type": "number", "required": False},
         {"key": "alive", "label": "成活株数", "type": "number", "required": False},
+        {"key": "remark", "label": "备注", "type": "text", "required": False},
         {"key": "x", "label": "坐标x(经度)", "type": "number", "required": False},
         {"key": "y", "label": "坐标y(纬度)", "type": "number", "required": False},
     ],
 }
 
 # ── 样地统计（computed，对应基本信息模板 苗木合格率 组：查数株数/合格株树/合格率）──
-# 查数株数=Σ种植株数；合格率=Σ成活株数÷Σ种植株数×100；合格株数=round(查数株数×合格率)
+# 查数株数=调查总株数（样地模板 B34 同口径）=round(Σ种植÷个数÷150×网格面积×网格数量)；
+# 合格率=Σ成活株数÷Σ种植株数×100；合格数=round(查数株数×合格率)
 _SAMPLE_STATS = [
     {"key": "planted_total", "label": "小班查数株数", "type": "computed", "formula": "s_planted_total", "group": "苗木合格率", "col_span": "third"},
     {"key": "qualified_count", "label": "合格株树", "type": "computed", "formula": "s_qualified_count", "group": "苗木合格率", "col_span": "third"},
