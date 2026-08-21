@@ -604,9 +604,22 @@ input, select, textarea, button {
 .sm-save-state { font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .samples-list {
   flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
-  padding: 10px 12px 24px;
+  padding: 10px 12px 12px;
   display: flex; flex-direction: column; gap: 10px;
 }
+/* 底部「添加样地」大按钮（列表在按钮前面，防卡片被上方控件遮挡） */
+.sm-add-btn {
+  flex: 0 0 auto;
+  margin: 4px 12px calc(10px + env(safe-area-inset-bottom));
+  height: 48px;
+  border: none; border-radius: 12px;
+  background: linear-gradient(180deg, var(--green-l), var(--green));
+  color: #fff;
+  font-size: 17px; font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(46,125,50,.35);
+}
+.sm-add-btn:active { transform: translateY(1px); }
 .samples-list .sample-card-body {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px; padding: 8px;
@@ -614,6 +627,52 @@ input, select, textarea, button {
 .field-sm { min-width: 0; }
 .field-sm .f-input { width: 100%; box-sizing: border-box; min-height: 38px; }
 .input-error { border-color: #e53935 !important; box-shadow: 0 0 0 2px rgba(229, 57, 53, .15); }
+
+/* ── 样地页汇总区（模板 R27-R39 对应字段）── */
+.sm-summary {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  padding: 8px 12px;
+}
+.sm-sum-stats {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px; margin-bottom: 8px;
+}
+.sm-sum-stat {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2, #fafafa);
+  padding: 4px 8px; min-width: 0;
+}
+.sm-sum-stat label { display: block; font-size: 11px; color: var(--text-2); white-space: nowrap; }
+.sm-sum-stat b { font-size: 15px; word-break: break-all; }
+.sm-sum-form {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.sm-sum-field { min-width: 0; }
+.sm-sum-field label { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 2px; font-weight: 600; }
+.sm-sum-field .f-input { width: 100%; box-sizing: border-box; min-height: 36px; }
+
+/* 样地卡片死亡株数提示 */
+.sample-death {
+  grid-column: 1 / -1;
+  font-size: 12px; color: var(--text-2);
+  padding-top: 4px; border-top: 1px dashed var(--border);
+}
+.sample-death b { font-size: 14px; color: var(--text); }
+.sample-death small { color: var(--text-2); }
+
+/* 网格工具栏调查小班号搜索框 */
+.grid-toolbar .grid-sc-search {
+  height: 34px; width: 108px;
+  padding: 0 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2, #fff); color: var(--text);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+.grid-toolbar .grid-sc-search:focus { outline: none; border-color: var(--green, #2e7d32); }
 /* 卡片头：标题 + 只读坐标 + 按钮组（允许换行不挤压） */
 .samples-list .sample-card-head {
   flex-wrap: wrap; gap: 4px 8px;
@@ -669,6 +728,8 @@ input, select, textarea, button {
 .modal-actions button { flex: 1; height: 42px; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; }
 .btn-cancel { background: var(--panel-2); color: var(--text-2); border: 1px solid var(--border); }
 .btn-confirm { background: var(--green); color: #fff; }
+/* 覆盖坐标确认弹窗提示文案 */
+.sm-confirm-tip { font-size: 14px; color: var(--text-2); line-height: 1.5; margin-top: 2px; }
 
 /* ── 帮助按钮 ── */
 .help-btn {

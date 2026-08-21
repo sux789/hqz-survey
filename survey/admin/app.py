@@ -21,15 +21,20 @@
   GET  /admin/api/projects              项目列表
   DELETE /admin/api/projects/<pid>      删除项目（含关联 GDB/数据）
   GET/POST/DELETE /admin/api/projects/<pid>/members  成员管理
-  GET/POST /admin/api/projects/<pid>/prefilled/<tid>  预填数据
-  GET  /admin/api/projects/<pid>/export  导出 xlsx
+  GET/POST/DELETE /admin/api/projects/<pid>/prefilled/<tid>  预填数据
+  GET  /admin/api/projects/<pid>/export_base     导出基本信息 xlsx（?cat=分类 单 sheet 不打包）
+  GET  /admin/api/projects/<pid>/export_samples  导出样地（?cat=分类：每小班一个 xlsx 打包 zip）
+  GET  /admin/api/projects/<pid>/export_tracks   导出轨迹 GPX zip（?cat=分类 仅该分类）
+  GET  /admin/api/projects/<pid>/categories      项目含有的分类清单
 """
 import hashlib
 import os
+import re
 import secrets
 import sqlite3
 import sys
 import uuid
+from datetime import date as _date
 from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -594,22 +599,35 @@ def api_prefilled(pid, table_id):
 
 # ── 导出 ──
 
+def _dl_year(proj):
+    """分类下载文件名年度：项目名「(2023 年度)」正则 → 当前年。"""
+    m = re.search(r"(\d{4})\s*年度", (proj or {}).get("name") or "")
+    return m.group(1) if m else str(_date.today().year)
+
+
 @app.route("/api/projects/<pid>/export_base")
 @_admin_required
 def api_export_base(pid):
-    """导出基本信息 xlsx（tpl-base 模板，一项目一文件，3 分类 sheet）。"""
+    """导出基本信息 xlsx（tpl-base 模板，一项目一文件，3 分类 sheet）。
+
+    ?cat=<分类> 仅导出该分类 sheet（分类下载：不打包，直接下载单个 xlsx）。
+    """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
+    cat = request.args.get("cat", "").strip()
     try:
-        output, stats = exporter.export_base(pid)
-        filename = f"{proj['name']}_基本信息.xlsx"
+        output, stats = exporter.export_base(pid, category=cat or None)
+        filename = (f"{cat}-{_dl_year(proj)}-基本信息.xlsx" if cat
+                    else f"{proj['name']}_基本信息.xlsx")
         return send_file(
             output,
             as_attachment=True,
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -619,11 +637,25 @@ def api_export_base(pid):
 @app.route("/api/projects/<pid>/export_samples")
 @_admin_required
 def api_export_samples(pid):
-    """导出样地 xlsx（tpl-样地 模板，每分类一个 sheet，块结构）。"""
+    """导出样地 xlsx（tpl-样地 模板，每分类一个 sheet，块结构）。
+
+    ?cat=<分类>（分类下载）：按小班拆分打包 zip——每小班一个 xlsx，
+    文件名 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx。
+    """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
+    cat = request.args.get("cat", "").strip()
     try:
+        if cat:
+            output, stats = exporter.export_samples_zip(pid, category=cat)
+            filename = f"{cat}-{_dl_year(proj)}-样地.zip"
+            return send_file(
+                output,
+                as_attachment=True,
+                download_name=filename,
+                mimetype="application/zip",
+            )
         output, stats = exporter.export_samples(pid)
         filename = f"{proj['name']}_样地.xlsx"
         return send_file(
@@ -632,6 +664,8 @@ def api_export_samples(pid):
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -641,13 +675,18 @@ def api_export_samples(pid):
 @app.route("/api/projects/<pid>/export_tracks")
 @_admin_required
 def api_export_tracks(pid):
-    """导出项目全部轨迹为 GPX zip（ArcGIS 可直接识别）。"""
+    """导出项目轨迹为 GPX zip（ArcGIS 可直接识别）。
+
+    ?cat=<分类> 仅导出该分类小班的轨迹（项目管理「分类下载」）。
+    """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
+    cat = request.args.get("cat", "").strip()
     try:
-        output, stats = exporter.export_tracks_zip(pid)
-        filename = f"{proj['name']}_轨迹GPX.zip"
+        output, stats = exporter.export_tracks_zip(pid, category=cat or None)
+        filename = (f"{cat}-{_dl_year(proj)}-轨迹.zip" if cat
+                    else f"{proj['name']}_轨迹GPX.zip")
         return send_file(
             output,
             as_attachment=True,
@@ -660,6 +699,24 @@ def api_export_tracks(pid):
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"导出失败: {e}"}), 500
+
+
+@app.route("/api/projects/<pid>/categories")
+@_admin_required
+def api_project_categories(pid):
+    """返回项目含有的分类清单（项目管理「分类下载」展开行用）。"""
+    conn = storage._connect()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT category FROM subcompartment_rows "
+            "WHERE (gdb_id IN (SELECT id FROM gdb_files WHERE project_id=?) "
+            "  OR batch_id IN (SELECT id FROM subcompartment_batches WHERE project_id=?)) "
+            "AND category != '' ORDER BY category",
+            (pid, pid)
+        ).fetchall()
+        return jsonify({"categories": [r["category"] for r in rows]})
+    finally:
+        conn.close()
 
 
 # ── Schema（admin 也需要）──

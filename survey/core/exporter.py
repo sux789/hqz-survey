@@ -22,6 +22,7 @@ import base64
 import io
 import re
 from copy import copy as _style_copy
+from datetime import date as _date
 from pathlib import Path
 
 import openpyxl
@@ -36,9 +37,13 @@ from survey.core import gdb as GDB
 #   2023年度封山育林 / 2023年度退化林，官方预填示例），
 #   导出前必须先清空数据区（见 _clear_*），deploy.sh 会同步 tpl/。
 # 样地模板：tpl-samples.xlsx 清理版（块结构已清示例），
-#   布局（2026-08-21 起去掉项目类型行，38 行一块）：
+#   布局（2026-08-21 起去掉项目类型行、加验收人/验收日期，39 行一块）：
 #   R1 标题（含调查小班号）/ R2 年度县乡+坐标+照片 / R3 列头 /
-#   R4-26 数据槽（23 个）/ R27-38 汇总区（B27-B34 公式行号随布局）。
+#   R4-26 数据槽（23 个）/ R27-39 汇总区：
+#   B27 总样地个数(代码写) / B28-30 SUM公式 / B31 成活率公式(除0守卫) /
+#   B32 单个网格面积 / B33 种植网格数量(手写录入) /
+#   B34 调查总株数公式(除0守卫) / B35 撑杆 / B36 覆膜 / B37 验收人 /
+#   B38 验收日期 / B39 备注（均手写录入，data_json.sm_* 键）。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _TPL_DIR = _PROJECT_ROOT / "tpl"
 _BASE_TEMPLATE = _TPL_DIR / "tpl-base.xlsx"
@@ -273,8 +278,8 @@ _TPL_SHEET_NAMES = {
 # 基本信息模板数据起始行（1-2 标题，3-4 表头）
 _BASE_DATA_START = 5
 
-# 样地模板块结构（tpl-samples.xlsx，块高 38 行）
-_SAMPLE_BLOCK_ROWS = 38
+# 样地模板块结构（tpl-samples.xlsx，块高 39 行）
+_SAMPLE_BLOCK_ROWS = 39
 _SAMPLE_DATA_START = 4    # 块内数据起始行（样地号 1）
 _SAMPLE_DATA_SLOTS = 23   # 模板预留样地槽位数（行4-26）
 
@@ -610,15 +615,21 @@ def _copy_sample_block(ws, offset):
                            end_row=m.max_row + offset, end_column=m.max_col)
 
 
-def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
-    """填充一个小班的样地块（行 block_idx*38+1 起）。"""
+def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, data):
+    """填充一个小班的样地块（行 block_idx*39+1 起）。
+
+    data 为该小班表记录的 data_json：samples 数组 + sm_* 汇总手写项。
+    """
     base = block_idx * _SAMPLE_BLOCK_ROWS
     if block_idx > 0:
         _copy_sample_block(ws, base)
     prefilled = S.map_subcompartment_to_prefilled(sc_row.get("data", {}))
+    samples = data.get("samples", []) if isinstance(data, dict) else []
+    samples = samples if isinstance(samples, list) else []
 
     # R1 标题（项目名称+类型+调查小班号）；R2 年度县乡；R3 列头（不动）
-    data = sc_row.get("data", {}) or {}
+    # gdb_data：GDB 导入的小班属性（区别于参数 data＝调查记录 data_json）
+    gdb_data = sc_row.get("data", {}) or {}
 
     def _int_like(v):
         """2023.0 → 2023、5.0 → 5（GDB 浮点字段按整数显示）。"""
@@ -629,7 +640,7 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
             return str(v or "").strip()
 
     # 小班原始号（调查小班号≠小班时 GDB 导入保留原值；相同则即小班号本身）
-    orig_no = _int_like(data.get("小班原始") or data.get("小班")
+    orig_no = _int_like(gdb_data.get("小班原始") or gdb_data.get("小班")
                         or sc_row.get("subcompartment"))
     survey_no = _int_like(sc_row.get("subcompartment"))
     # 标题含调查小班号（模板占位「样地调查表（项目名称+类型）调查小班号」）；
@@ -682,7 +693,39 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, samples):
             if names:
                 ws.cell(row=r, column=8, value=";".join(names))
 
-    # 总样地个数（B27 起）等「手写」行留空；聚合公式（B28-B31/B34）由块复制保留
+    # 总样地个数（B27）：优先手写值（样地页汇总表单 sm_total_count，前端默认
+    # 自动填充实际样地数、手改后以用户值为准；与前端 smSummaryComputed 同口径：
+    # 手写值 >0 才生效），无有效手写值回退实际样地数；
+    # B28-B30 SUM / B31 成活率 / B34 调查总株数 公式由块复制保留（模板已加除0守卫，
+    # B34 公式引用 B27，手写个数同样参与计算）
+    n = None
+    hand_n = data.get('sm_total_count') if isinstance(data, dict) else None
+    if hand_n not in ('', None):
+        try:
+            nf = float(hand_n)
+            if nf > 0:
+                n = int(round(nf))
+        except (ValueError, TypeError):
+            n = None
+    if n is None:
+        n = sum(1 for s in samples if isinstance(s, dict))
+    ws.cell(row=base + 27, column=2, value=n)
+
+    # 手写录入项（样地页汇总表单，data_json.sm_* 键）：
+    # B32 单个网格面积 / B33 种植网格数量（数值，参与 B34 公式计算）
+    for r, k in ((32, 'sm_grid_area'), (33, 'sm_grid_count')):
+        v = data.get(k) if isinstance(data, dict) else None
+        if v not in ('', None):
+            try:
+                ws.cell(row=base + r, column=2, value=float(v))
+            except (ValueError, TypeError):
+                ws.cell(row=base + r, column=2, value=v)
+    # B35 撑杆 / B36 覆膜 / B37 验收人 / B38 验收日期 / B39 备注（文本）
+    for r, k in ((35, 'sm_pole'), (36, 'sm_film'), (37, 'sm_inspector'),
+                 (38, 'sm_inspect_date'), (39, 'sm_remark')):
+        v = data.get(k) if isinstance(data, dict) else None
+        if v not in ('', None):
+            ws.cell(row=base + r, column=2, value=str(v))
 
 
 def _clear_sample_template_block(ws):
@@ -704,7 +747,7 @@ def _clear_sample_template_block(ws):
     for r in range(_SAMPLE_DATA_START, _SAMPLE_DATA_START + _SAMPLE_DATA_SLOTS):
         for c in range(1, 9):  # A-H
             ws.cell(row=r, column=c).value = None
-    # 手写项：总样地个数(R27 B)/单个网格面积(R32 B)/种植网格数量(R33 B)
+    # 手写项残留清理：总样地个数(R27 B)/单个网格面积(R32 B)/种植网格数量(R33 B)
     for r in (27, 32, 33):
         ws.cell(row=r, column=2).value = None
 
@@ -715,14 +758,15 @@ def _sheet_safe(name):
     return (cleaned or "sheet")[:31]
 
 
-def export_samples(pid, output_path=None, subcompartment_id=None):
-    """导出项目样地 xlsx（tpl-samples 模板，每分类一个 sheet，每小班一个 38 行块）。
+def export_samples(pid, output_path=None, subcompartment_id=None, category=None):
+    """导出项目样地 xlsx（tpl-samples 模板，每分类一个 sheet，每小班一个 39 行块）。
 
     Args:
         pid: 项目 ID
         output_path: 输出路径，None 则返回 BytesIO
         subcompartment_id: 可选，仅导出该小班（用户端样地页「导出」按钮）。
                            单小班模式下 sheet 名为「分类-调查小班号」。
+        category: 可选，仅导出该分类（admin 项目管理「分类下载」，每分类一个文件）。
 
     Returns:
         (output_path, stats) 元组
@@ -755,11 +799,10 @@ def export_samples(pid, output_path=None, subcompartment_id=None):
         survey_map = {rec["subcompartment_id"]: rec.get("data", {}) or {}
                       for rec in storage.get_survey_rows(pid, table_id)}
         data = survey_map.get(sc_row["id"], {}) or {}
-        _fill_sample_block(ws, 0, cat, project["name"], sc_row,
-                           data.get("samples", []))
+        _fill_sample_block(ws, 0, cat, project["name"], sc_row, data)
         stats["sheets"][sheet_name] = 1
     else:
-        for cat in _TPL_SHEET_NAMES:
+        for cat in ([category] if category else list(_TPL_SHEET_NAMES)):
             table_id = GDB.GDB_CATEGORY_TO_TABLE.get(cat)
             if not table_id:
                 continue
@@ -773,8 +816,7 @@ def export_samples(pid, output_path=None, subcompartment_id=None):
                           for rec in storage.get_survey_rows(pid, table_id)}
             for i, sc_row in enumerate(sc_rows):
                 data = survey_map.get(sc_row["id"], {}) or {}
-                _fill_sample_block(ws, i, cat, project["name"], sc_row,
-                                   data.get("samples", []))
+                _fill_sample_block(ws, i, cat, project["name"], sc_row, data)
             stats["sheets"][cat] = len(sc_rows)
 
     wb.remove(tpl_ws)
@@ -790,19 +832,102 @@ def export_samples(pid, output_path=None, subcompartment_id=None):
     return str(output_path), stats
 
 
+def export_samples_zip(pid, category=None):
+    """样地按小班拆分导出并打包 zip（后台「分类下载」）。
+
+    每小班一个 xlsx（单小班模式：该分类一个 sheet、该小班一个块），
+    文件名 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx；
+    年度取小班计划年度（GDB）→ 项目名「(2023 年度)」→ 当前年；
+    同名冲突（跨村重复林班小班号）追加 _2/_3 序号。
+
+    Returns:
+        (BytesIO(zip), {"files": n})
+    """
+    import zipfile
+    sc_rows = storage.list_project_subcompartment_rows(pid, category=category)
+    sc_rows.sort(key=_sc_sort_key)
+    if not sc_rows:
+        raise ValueError("该分类暂无小班数据")
+    buf = io.BytesIO()
+    used = {}
+    n = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for sc_row in sc_rows:
+            try:
+                out, _stats = export_samples(pid, subcompartment_id=sc_row["id"])
+            except ValueError:
+                continue  # 分类无对应调查表等异常小班跳过
+            base = _sc_file_base(sc_row)
+            k = used.get(base, 0) + 1
+            used[base] = k
+            zf.writestr(f"{base}.xlsx" if k == 1 else f"{base}_{k}.xlsx",
+                        out.getvalue())
+            n += 1
+    if n == 0:
+        raise ValueError("该分类暂无样地数据")
+    buf.seek(0)
+    return buf, {"files": n}
+
+
 # ════════════════════════════════════════════
 # 轨迹 GPX 导出（ArcGIS Pro / ArcMap / QGIS 直接识别）
 # ════════════════════════════════════════════
 
-def _track_gpx_filename(sc_row):
-    """轨迹 GPX 文件名：分类_乡镇_村_小班.gpx（与照片命名规则一致）。"""
-    parts = [
+def _parse_year(v):
+    """年度值清洗："2023.0"/2023/"2023" → "2023"；无法解析返回 None。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        n = float(s)
+    except ValueError:
+        return None
+    return str(int(round(n))) if n > 0 else None
+
+
+def _sc_year(sc_row):
+    """小班年度：GDB 计划年度 → 所属项目名「(2023 年度)」正则 → 当前年。"""
+    data = sc_row.get("data")
+    y = _parse_year(data.get("计划年度")) if isinstance(data, dict) else None
+    if y:
+        return y
+    m = re.search(r"(\d{4})\s*年度", str(sc_row.get("project_name") or ""))
+    if m:
+        return m.group(1)
+    return str(_date.today().year)
+
+
+def _sc_file_stem(sc_row):
+    """小班文件名主干：林班>0 时「林班-小班」（防跨林班同号冲突），否则小班号。"""
+    try:
+        fc = int(sc_row.get("forest_compartment") or 0)
+    except (TypeError, ValueError):
+        fc = 0
+    sc = sc_row.get("subcompartment")
+    if sc in (None, ""):
+        sc = sc_row.get("subcompartment_label")
+    return f"{fc}-{sc}" if fc > 0 else f"{sc}"
+
+
+def _sc_file_base(sc_row):
+    """导出文件名主干（去扩展名）：{林班-小班|小班}号调查小班-{分类}-{年度}。"""
+    return "-".join(str(p).strip() for p in (
+        f"{_sc_file_stem(sc_row)}号调查小班",
         sc_row.get("category") or "",
-        sc_row.get("township") or "",
-        sc_row.get("village") or "",
-        str(sc_row.get("subcompartment") or sc_row.get("subcompartment_label") or ""),
-    ]
-    return "_".join(str(p).strip() for p in parts if p and str(p).strip()) + ".gpx"
+        _sc_year(sc_row),
+    ) if p and str(p).strip())
+
+
+def _track_gpx_filename(sc_row):
+    """轨迹 GPX 文件名：{林班-小班|小班}号调查小班-{分类}-{年度}.gpx。
+
+    2026-08-21 改版（与后台分类下载的样地文件命名统一）：
+    旧名「分类_乡镇_村_小班.gpx」→ 新名如「1号调查小班-人工造林-2023.gpx」。
+    Excel 轨迹列与 GPX zip 内文件名同源（本函数），改版后两处一致。
+    """
+    return _sc_file_base(sc_row) + ".gpx"
 
 
 def _track_gpx(track, name):
@@ -829,11 +954,15 @@ def _track_gpx(track, name):
     )
 
 
-def export_tracks_zip(pid):
-    """导出项目全部小班轨迹为 GPX，打包 zip 返回。
+def export_tracks_zip(pid, category=None):
+    """导出项目小班轨迹为 GPX，打包 zip 返回。
 
     每个有轨迹的小班一个 .gpx 文件（tracks/ 目录下），
     ArcGIS Pro 直接拖入即可转要素（GPX To Features）。
+
+    Args:
+        pid: 项目 ID
+        category: 可选，仅导出该分类小班的轨迹（admin 分类下载）。
 
     Returns:
         (BytesIO(zip), {"gpx": n, "total_points": m})
@@ -841,17 +970,23 @@ def export_tracks_zip(pid):
     import zipfile
     from xml.sax.saxutils import escape as _xml_escape
 
-    sc_rows = storage.list_project_subcompartment_rows(pid)
+    sc_rows = storage.list_project_subcompartment_rows(pid, category=category)
     sc_rows.sort(key=_sc_sort_key)  # 按调查小班号排序，与 Excel 导出一致
     buf = io.BytesIO()
     gpx_count = 0
     total_pts = 0
+    used = {}
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for sc_row in sc_rows:
             track = (storage.get_extras(sc_row["id"]) or {}).get("track") or []
             if not track:
                 continue
-            fname = _track_gpx_filename(sc_row)
+            # 文件名与 Excel 轨迹列同源（_track_gpx_filename）；
+            # 同名冲突（跨村重复林班小班号）追加序号
+            base = _sc_file_base(sc_row)
+            k = used.get(base, 0) + 1
+            used[base] = k
+            fname = f"{base}.gpx" if k == 1 else f"{base}_{k}.gpx"
             gpx = _track_gpx(track, _xml_escape(sc_row.get("subcompartment_label") or fname))
             if not gpx:
                 continue

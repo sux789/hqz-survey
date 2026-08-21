@@ -108,7 +108,7 @@ def sample_data(sample_project):
         "造林树种": "华山松", "上报面积": 80, "需苗量": 9000,
     }, forest_compartment=1, subcompartment=3, row_index=0)
 
-    # sc1 录入：样地 2 个（种植 100+100，成活 90+85）
+    # sc1 录入：样地 2 个（种植 100+100，成活 90+85）+ 汇总手写项
     storage.upsert_survey_row(pid, "table1", sc1, {
         "survival_pass": "85",
         "remark": "测试备注",
@@ -118,6 +118,13 @@ def sample_data(sample_project):
              "x": 102.123456, "y": 25.654321},
             {"no": 2, "area": 100, "planted": 100, "alive": 85, "x": 102.2, "y": 25.6},
         ],
+        "sm_grid_area": "5000",
+        "sm_grid_count": "4",
+        "sm_pole": "完好",
+        "sm_film": "无膜",
+        "sm_inspector": "李四",
+        "sm_inspect_date": "2026-08-21",
+        "sm_remark": "汇总备注测试",
     }, "张三")
     return {"pid": pid, "sc1": sc1, "sc2": sc2}
 
@@ -319,19 +326,77 @@ class TestExportSamples:
         assert stats["project"] == "测试项目"
 
     def test_block_structure(self, sample_data):
-        """每小班一个 38 行块：sc2 块1（行1-38），sc1 块2（行39-76）。"""
+        """每小班一个 39 行块：sc2 块1（行1-39），sc1 块2（行40-78）。"""
         output, _ = exporter.export_samples(sample_data["pid"])
         wb = openpyxl.load_workbook(output)
         assert "人工造林" in wb.sheetnames
         ws = wb["人工造林"]
-        # 块2 起始行 39 的标题 + 块内样地数据（行 42-43，数据起始 39+3）
-        assert "样地调查表" in str(ws.cell(row=39, column=1).value)
-        # sc1 样地1：行 39+3=42，A=样地号1，C=种植100，D=成活90
-        assert ws.cell(row=42, column=1).value == 1
-        assert ws.cell(row=42, column=3).value == 100
-        assert ws.cell(row=42, column=4).value == 90
+        # 块2 起始行 40 的标题 + 块内样地数据（行 43-44，数据起始 40+3）
+        assert "样地调查表" in str(ws.cell(row=40, column=1).value)
+        # 块1 的 R39 为备注行（模板自带标签，块2 覆盖为标题）
+        assert ws.cell(row=39, column=1).value == "备注"
+        # sc1 样地1：行 40+3=43，A=样地号1，C=种植100，D=成活90
+        assert ws.cell(row=43, column=1).value == 1
+        assert ws.cell(row=43, column=3).value == 100
+        assert ws.cell(row=43, column=4).value == 90
         # 死亡株数公式（E 列）
-        assert ws.cell(row=42, column=5).value == "=C42-D42"
+        assert ws.cell(row=43, column=5).value == "=C43-D43"
+
+    def test_summary_fields(self, sample_data):
+        """汇总区 R27-R39：个数/手写项写入，公式带除0守卫并按块偏移。"""
+        output, _ = exporter.export_samples(
+            sample_data["pid"], subcompartment_id=sample_data["sc1"])
+        wb = openpyxl.load_workbook(output)
+        ws = wb["人工造林-5"]
+        # B27 总样地个数 = 样地数（代码计算写入）
+        assert ws.cell(row=27, column=2).value == 2
+        # B28-30 SUM 公式保留；B31/B34 带 IF 除0守卫
+        assert ws.cell(row=28, column=2).value == "=SUM(B4:B26)"
+        assert ws.cell(row=31, column=2).value == '=IF(B29=0,"",B30/B29)'
+        assert ws.cell(row=34, column=2).value == \
+            '=IF(OR(B27=0,B29=0),"",ROUND(B29/B27/150*B32*B33,0))'
+        # 手写录入项（sm_* → B32-B39）
+        assert ws.cell(row=32, column=2).value == 5000.0
+        assert ws.cell(row=33, column=2).value == 4.0
+        assert ws.cell(row=35, column=2).value == "完好"
+        assert ws.cell(row=36, column=2).value == "无膜"
+        assert ws.cell(row=37, column=2).value == "李四"
+        assert ws.cell(row=38, column=2).value == "2026-08-21"
+        assert ws.cell(row=39, column=2).value == "汇总备注测试"
+
+    def test_total_count_manual_override(self, sample_data):
+        """B27 总样地个数：手写 sm_total_count 优先（>0 生效），无效/空回退样地数。"""
+        pid = sample_data["pid"]
+        sc1 = sample_data["sc1"]
+        # 手写覆盖：个数写 5（≠ 实际样地数 2）
+        rec = storage.get_survey_rows(pid, "table1")
+        d = next(r["data"] for r in rec if r["subcompartment_id"] == sc1)
+        d["sm_total_count"] = "5"
+        storage.upsert_survey_row(pid, "table1", sc1, d, "张三")
+        output, _ = exporter.export_samples(pid, subcompartment_id=sc1)
+        wb = openpyxl.load_workbook(output)
+        assert wb["人工造林-5"].cell(row=27, column=2).value == 5
+
+        # 无效值（0/非数字）回退实际样地数
+        for bad in ("0", "-1", "abc", ""):
+            d["sm_total_count"] = bad
+            storage.upsert_survey_row(pid, "table1", sc1, d, "张三")
+            output, _ = exporter.export_samples(pid, subcompartment_id=sc1)
+            wb = openpyxl.load_workbook(output)
+            assert wb["人工造林-5"].cell(row=27, column=2).value == 2, bad
+
+    def test_summary_block2_shift(self, sample_data):
+        """块2 汇总公式行号偏移 + 手写项按块写入（块2=sc1 有录入）。"""
+        output, _ = exporter.export_samples(sample_data["pid"])
+        wb = openpyxl.load_workbook(output)
+        ws = wb["人工造林"]
+        # 排序后 sc2(小班3)=块1、sc1(小班5)=块2（行40起）
+        # 块2 B31 公式偏移为 =IF(B68=0,"",B69/B68)
+        assert ws.cell(row=40 + 30, column=2).value == '=IF(B68=0,"",B69/B68)'
+        # 块2 = sc1：总样地个数 2、网格面积/备注照常写入
+        assert ws.cell(row=40 + 26, column=2).value == 2
+        assert ws.cell(row=40 + 31, column=2).value == 5000.0
+        assert ws.cell(row=40 + 38, column=2).value == "汇总备注测试"
 
     def test_empty_category_skipped(self, sample_data):
         """无数据的分类跳过（不建 sheet，不崩）。"""
@@ -348,11 +413,11 @@ class TestExportSamples:
         wb = openpyxl.load_workbook(output)
         assert wb.sheetnames == ["人工造林-5"]
         ws = wb["人工造林-5"]
-        # 只有块1：sc1 样地1 在行 4（块1数据起始），行 39（块2标题位）应为空
+        # 只有块1：sc1 样地1 在行 4（块1数据起始），行 40（块2标题位）应为空
         assert ws.cell(row=4, column=1).value == 1
         assert ws.cell(row=4, column=3).value == 100
         assert ws.cell(row=4, column=4).value == 90
-        assert ws.cell(row=39, column=1).value is None
+        assert ws.cell(row=40, column=1).value is None
         assert stats["sheets"] == {"人工造林-5": 1}
 
     def test_title_and_coord_precision(self, sample_data):
@@ -377,9 +442,79 @@ class TestExportSamples:
         with pytest.raises(ValueError, match="小班不存在"):
             exporter.export_samples(sample_data["pid"], subcompartment_id="no_such_id")
 
+    def test_category_filter(self, sample_data):
+        """分类过滤（admin 分类下载）：仅导出该分类一个 sheet，每分类一个文件。"""
+        output, stats = exporter.export_samples(sample_data["pid"], category="人工造林")
+        wb = openpyxl.load_workbook(output)
+        assert wb.sheetnames == ["人工造林"]
+        assert stats["sheets"] == {"人工造林": 2}
+
+    def test_category_filter_empty_raises(self, sample_data):
+        """分类过滤：该分类无小班时 ValueError（端点转 404）。"""
+        with pytest.raises(ValueError, match="暂无小班数据"):
+            exporter.export_samples(sample_data["pid"], category="封山育林")
+
+    def test_samples_zip_per_subcompartment(self, sample_data):
+        """分类下载样地 zip：每小班一个 xlsx，命名 {林班-小班}号调查小班-{分类}-{年度}.xlsx。"""
+        import zipfile
+        from datetime import date
+        buf, stats = exporter.export_samples_zip(sample_data["pid"], category="人工造林")
+        assert stats["files"] == 2
+        with zipfile.ZipFile(buf) as zf:
+            names = sorted(zf.namelist())
+        # sc1：林班1小班5 计划年度2023；sc2：林班1小班3 无年度→项目名无年度→当前年
+        assert names == [
+            "1-3号调查小班-人工造林-%d.xlsx" % date.today().year,
+            "1-5号调查小班-人工造林-2023.xlsx",
+        ]
+        # 每个 xlsx 可打开且为单小班模式（一个 sheet 一个块）
+        with zipfile.ZipFile(buf) as zf:
+            wb = openpyxl.load_workbook(io.BytesIO(
+                zf.read("1-5号调查小班-人工造林-2023.xlsx")))
+        assert wb.sheetnames == ["人工造林-5"]
+        assert wb["人工造林-5"].cell(row=4, column=3).value == 100  # 样地1 面积
+
+    def test_samples_zip_empty_category_raises(self, sample_data):
+        """样地 zip：该分类无小班时 ValueError（端点转 404）。"""
+        with pytest.raises(ValueError, match="暂无小班数据"):
+            exporter.export_samples_zip(sample_data["pid"], category="封山育林")
+
 
 class TestExportTracks:
     def test_no_tracks_raises(self, sample_data):
         """无轨迹时抛 ValueError（端点转 404）。"""
         with pytest.raises(ValueError, match="暂无轨迹"):
             exporter.export_tracks_zip(sample_data["pid"])
+
+    def test_category_filter(self, sample_data):
+        """分类过滤：仅打包该分类小班的轨迹 GPX（新命名：小班号-分类-年度.gpx）。"""
+        import zipfile
+        from datetime import date
+        pid = sample_data["pid"]
+        sc3 = _insert_sc_row(pid, {
+            "乡镇": "测试乡", "村": "测试村", "林班": 2, "小班": 7, "调查小班号": 7,
+        }, forest_compartment=2, subcompartment=7, category="封山育林", row_index=2)
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+        ])
+        storage.save_track(sc3, [
+            {"lng": 102.3, "lat": 25.7, "t": "2026-08-21T11:00:00"},
+        ])
+        buf, stats = exporter.export_tracks_zip(pid, category="封山育林")
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+        # sc3：林班2小班7，无计划年度，项目名无年度 → 当前年
+        assert names == [f"tracks/2-7号调查小班-封山育林-{date.today().year}.gpx"]
+        # 不过滤则两类各一条：sc1 计划年度 2023
+        buf_all, stats_all = exporter.export_tracks_zip(pid)
+        with zipfile.ZipFile(buf_all) as zf:
+            assert sorted(zf.namelist()) == [
+                "tracks/1-5号调查小班-人工造林-2023.gpx",
+                f"tracks/2-7号调查小班-封山育林-{date.today().year}.gpx",
+            ]
+        # 过滤无轨迹分类 → ValueError
+        sc4 = _insert_sc_row(pid, {
+            "乡镇": "测试乡", "村": "测试村", "林班": 3, "小班": 9, "调查小班号": 9,
+        }, forest_compartment=3, subcompartment=9, category="退化林修复", row_index=3)
+        with pytest.raises(ValueError, match="暂无轨迹"):
+            exporter.export_tracks_zip(pid, category="退化林修复")

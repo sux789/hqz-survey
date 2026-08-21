@@ -302,25 +302,50 @@ def to_md(gdb_path, out_dir):
         f.write("\n".join(readme_lines) + "\n")
 
 
-def find_gdb_dirs(gdb_dir):
-    """在一二层目录内找 .gdb 目录（不深层递归）。
+def find_gdb_dirs(gdb_dir, max_depth=4):
+    """在解压根目录内找 .gdb 目录（受 max_depth 限制，避免无限递归）。
+
+    早期实现仅搜 1~2 层，导致用绝对路径 `zip -r` 压出的包（.gdb 被埋到
+    多层父目录里）上传报「压缩包内未找到 .gdb 目录」。放宽到 4 层即可兼容
+    大多数打包方式（Finder 右键压缩 / 相对路径 zip / 绝对路径 zip）。
+
+    macOS Finder「压缩」生成的 zip 会带 `__MACOSX/` 元数据目录，其内会镜像
+    出同名 `.gdb/` 假目录（仅含 `._` 开头的 AppleDouble 文件，非真 GDB）。
+    递归时会显式跳过 `__MACOSX`，否则假 .gdb 被当作真 GDB 读取会报
+    "not recognized as being in a supported file format" 并中断整次上传。
 
     Args:
         gdb_dir: 解压根目录 Path
+        max_depth: 最大搜索深度（含根目录自身为第 1 层），默认 4
 
     Returns:
-        [.gdb 目录 Path, ...]（一二层命中即止，不向下深挖）
+        [.gdb 目录 Path, ...]（按深度优先、目录遍历顺序）
     """
     found = []
-    for p in gdb_dir.iterdir():
+    _find_gdb_dirs_recursive(gdb_dir, depth=1, max_depth=max_depth, found=found)
+    return found
+
+
+# macOS Finder「压缩」生成的 zip 自带的 AppleDouble 元数据目录
+_MACOSX_DIRNAME = "__MACOSX"
+
+
+def _find_gdb_dirs_recursive(cur, depth, max_depth, found):
+    if depth > max_depth:
+        return
+    try:
+        entries = list(cur.iterdir())
+    except (PermissionError, OSError):
+        return
+    for p in entries:
+        # 跳过 macOS 压缩元数据目录：里面的 .gdb 是假目录（仅 AppleDouble 文件）
+        if p.name == _MACOSX_DIRNAME:
+            continue
         if p.is_dir() and p.suffix == ".gdb":
             found.append(p)
-        elif p.is_dir():
-            # 第二层
-            for p2 in p.iterdir():
-                if p2.is_dir() and p2.suffix == ".gdb":
-                    found.append(p2)
-    return found
+        elif p.is_dir() and depth < max_depth:
+            # 继续向下（受 max_depth 约束）
+            _find_gdb_dirs_recursive(p, depth + 1, max_depth, found)
 
 
 def scan_classified_layers(gdb_path):

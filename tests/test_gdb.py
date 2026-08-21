@@ -100,17 +100,43 @@ class TestSafeExtract:
 
 
 class TestFindGdbDirs:
-    def test_first_and_second_level(self, tmp_path):
+    def test_finds_up_to_four_levels(self, tmp_path):
+        # 第1~4层均命中；第5层超出 max_depth=4 不深挖
         (tmp_path / "a.gdb").mkdir()
-        (tmp_path / "wrapper" / "b.gdb").mkdir(parents=True)
-        (tmp_path / "wrapper" / "deep" / "c.gdb").mkdir(parents=True)
+        (tmp_path / "w1" / "b.gdb").mkdir(parents=True)
+        (tmp_path / "w1" / "w2" / "c.gdb").mkdir(parents=True)
+        (tmp_path / "w1" / "w2" / "w3" / "d.gdb").mkdir(parents=True)
+        (tmp_path / "w1" / "w2" / "w3" / "w4" / "e.gdb").mkdir(parents=True)
         found = GDB.find_gdb_dirs(tmp_path)
         names = sorted(p.name for p in found)
-        assert names == ["a.gdb", "b.gdb"]   # 三层 c.gdb 不深挖
+        assert names == ["a.gdb", "b.gdb", "c.gdb", "d.gdb"]  # e.gdb 在第5层被忽略
+
+    def test_max_depth_param(self, tmp_path):
+        (tmp_path / "w1" / "w2" / "c.gdb").mkdir(parents=True)
+        # 显式 max_depth=2 时第3层不命中
+        assert GDB.find_gdb_dirs(tmp_path, max_depth=2) == []
+        # 默认 4 层命中
+        assert len(GDB.find_gdb_dirs(tmp_path)) == 1
 
     def test_empty(self, tmp_path):
         (tmp_path / "plain").mkdir()
         assert GDB.find_gdb_dirs(tmp_path) == []
+
+    def test_skips_macosx_metadata_dir(self, tmp_path):
+        # macOS Finder「压缩」会在 zip 内生成 __MACOSX/，其下会镜像出同名
+        # .gdb 假目录（仅含 ._ 开头的 AppleDouble 文件）。该假 .gdb 必须被忽略，
+        # 否则读到它会被 pyogrio 判为非法格式而中断整次上传。
+        real = tmp_path / "项目包" / "玉溪2023.gdb"
+        real.mkdir(parents=True)
+        fake = tmp_path / "__MACOSX" / "项目包" / "玉溪2023.gdb"
+        fake.mkdir(parents=True)
+        # 假目录里放一个 AppleDouble 垃圾文件，模拟真实结构
+        (fake / "._a00000001.gdbtable").write_bytes(b"appledouble")
+
+        found = GDB.find_gdb_dirs(tmp_path)
+        names = [p.name for p in found]
+        assert names == ["玉溪2023.gdb"]          # 只找到真实 .gdb
+        assert not any("__MACOSX" in str(p) for p in found)  # 不含元数据陷阱
 
 
 class TestScanClassifiedLayers:

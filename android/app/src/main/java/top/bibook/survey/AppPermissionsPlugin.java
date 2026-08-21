@@ -29,7 +29,8 @@ import java.io.OutputStream;
  *   - check({type})         查询定位/相机权限状态
  *   - request({type})       申请定位/相机权限
  *   - openSettings()        打开本 App 的系统权限设置页
- *   - savePhoto({base64,name})  照片写入系统相册 Pictures/验收照片/，返回真实绝对路径
+ *   - savePhoto({base64,name,subdir})  照片写入系统相册 Pictures/{subdir}/（多级子目录，如
+ *                                      2022年度/人工造林/1号调查小班），返回真实绝对路径
  *   - saveFile({base64,name})   导出文件（xlsx/zip）写入公共下载 Download/验收导出/，返回真实绝对路径
  * type: 'location' | 'camera'
  */
@@ -101,8 +102,10 @@ public class AppPermissionsPlugin extends Plugin {
     }
 
     /**
-     * 照片写入系统相册 Pictures/验收照片/，返回真实绝对路径。
-     * Android 10+ 走 MediaStore（自有媒体免存储权限且立即可见于相册）；
+     * 照片写入系统相册 Pictures/{subdir}/，返回真实绝对路径。
+     * subdir 为多级子目录（如 "2022年度/人工造林/1号调查小班"），缺省 "验收照片"；
+     * 每段自动清理文件系统非法字符并防路径穿越（. / ..）。
+     * Android 10+ 走 MediaStore（自有媒体免存储权限且立即可见于相册，多级目录自动创建）；
      * 旧版本回退应用外部私有目录。
      */
     @PluginMethod
@@ -113,6 +116,7 @@ public class AppPermissionsPlugin extends Plugin {
             call.reject("缺少照片数据");
             return;
         }
+        String subdir = sanitizeSubdir(call.getString("subdir", "验收照片"));
         String mime = name.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
         try {
             byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
@@ -123,7 +127,7 @@ public class AppPermissionsPlugin extends Plugin {
             String realPath;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 values.put(MediaStore.Images.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_PICTURES + "/验收照片");
+                        Environment.DIRECTORY_PICTURES + "/" + subdir);
                 uri = getContext().getContentResolver().insert(
                         MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
                 if (uri == null) {
@@ -134,9 +138,11 @@ public class AppPermissionsPlugin extends Plugin {
                     os.write(bytes);
                     os.flush();
                 }
-                realPath = queryRealPath(uri);
+                realPath = queryFileRealPath(uri, new File(new File(
+                        Environment.getExternalStorageDirectory(),
+                        Environment.DIRECTORY_PICTURES), subdir));
             } else {
-                File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_PICTURES), "验收照片");
+                File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_PICTURES), subdir);
                 if (!dir.exists()) dir.mkdirs();
                 File f = new File(dir, name);
                 try (FileOutputStream fos = new FileOutputStream(f)) {
@@ -155,11 +161,19 @@ public class AppPermissionsPlugin extends Plugin {
         }
     }
 
-    /** 查询 MediaStore 记录的真实文件路径，失败时按约定目录构造。 */
-    private String queryRealPath(Uri uri) {
-        return queryFileRealPath(uri, new File(new File(
-                Environment.getExternalStorageDirectory(),
-                Environment.DIRECTORY_PICTURES), "验收照片"));
+    /** 清理子目录串：去每段非法字符、空段与路径穿越（. / ..），异常回退「验收照片」。 */
+    private String sanitizeSubdir(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return "验收照片";
+        String[] segs = raw.split("/");
+        StringBuilder sb = new StringBuilder();
+        for (String s : segs) {
+            String t = s.trim().replaceAll("[\\\\/:*?\"<>|\\s]+", "_");
+            if (t.isEmpty() || t.equals(".") || t.equals("..")) continue;
+            if (t.startsWith("_") && t.length() > 1) t = t.substring(1);
+            if (sb.length() > 0) sb.append('/');
+            sb.append(t);
+        }
+        return sb.length() > 0 ? sb.toString() : "验收照片";
     }
 
     /**

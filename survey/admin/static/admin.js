@@ -28,6 +28,9 @@ const state = {
   // Members
   memberProject: null,
   members: [],
+  // 分类下载（项目管理展开行）
+  catDownloadPid: null,     // 当前展开分类下载行的项目 id
+  projectCategories: {},    // pid -> [分类名]（懒加载缓存）
 };
 
 const app = document.getElementById('app');
@@ -205,7 +208,6 @@ async function loadGdbFiles() {
       <td>${escapeHtml(f.uploaded_by || '—')}</td>
       <td class="admin-actions-cell">
         <button class="btn-admin-action" data-action="gdb-view-layers" data-gid="${f.id}">查看图层</button>
-        <button class="btn-admin-action warn" data-action="gdb-delete" data-gid="${f.id}">删除</button>
       </td>
     </tr>`;
   }).join('');
@@ -261,19 +263,6 @@ async function uploadGdb() {
     await loadGdbFiles();
   } catch (e) {
     toast('上传失败：' + e.message, 3000);
-  }
-}
-
-async function deleteGdb(gid) {
-  if (!confirm('确认删除该 GDB 文件？关联的 GeoJSON 也将删除。')) return;
-  try {
-    await fetchJSON(`api/gdb/${gid}`, { method: 'DELETE' });
-    toast('已删除');
-    state.selectedGdb = null;
-    qs('#gdbDetailWrap').innerHTML = '';
-    await loadGdbFiles();
-  } catch (e) {
-    toast('删除失败：' + e.message, 2500);
   }
 }
 
@@ -478,7 +467,8 @@ async function loadProjectsTab() {
 function renderProjectsTable() {
   const rows = state.projects.map(p => {
     const date = (p.created_at || '').replace('T', ' ').slice(0, 16);
-    return `<tr class="admin-user-row">
+    const catLabel = state.catDownloadPid === p.id ? '收起分类' : '分类下载';
+    const mainRow = `<tr class="admin-user-row">
       <td>${escapeHtml(p.name)}</td>
       <td>${escapeHtml(p.creator || '—')}</td>
       <td>${escapeHtml(p.township || '—')}</td>
@@ -488,9 +478,11 @@ function renderProjectsTable() {
         <button class="btn-admin-action" data-action="proj-export-base" data-pid="${p.id}">基本信息</button>
         <button class="btn-admin-action" data-action="proj-export-samples" data-pid="${p.id}">样地</button>
         <button class="btn-admin-action" data-action="proj-export-tracks" data-pid="${p.id}">轨迹GPX</button>
+        <button class="btn-admin-action" data-action="proj-cat-download" data-pid="${p.id}">${catLabel}</button>
         <button class="btn-admin-action warn" data-action="proj-delete" data-pid="${p.id}" data-name="${escapeHtml(p.name)}">删除</button>
       </td>
     </tr>`;
+    return state.catDownloadPid === p.id ? mainRow + renderCatDownloadRow(p) : mainRow;
   }).join('');
   return `
     <h4 style="margin:0 0 8px; color:var(--green-d)">项目列表（${state.projects.length}）</h4>
@@ -551,6 +543,8 @@ async function deleteProject(pid, name) {
       state.memberProject = null;
       state.members = [];
     }
+    if (state.catDownloadPid === pid) state.catDownloadPid = null;
+    delete state.projectCategories[pid];
     await loadProjectsTab();
   } catch (e) {
     toast('删除失败：' + e.message, 3000);
@@ -567,6 +561,56 @@ function exportSamples(pid) {
 
 function exportTracks(pid) {
   window.open(`api/projects/${pid}/export_tracks`, '_blank');
+}
+
+// ── 分类下载（展开行：每分类样地 Excel 一个文件 + 轨迹 GPX zip）──
+
+function renderCatDownloadRow(p) {
+  const cats = state.projectCategories[p.id];
+  let inner;
+  if (!cats) {
+    inner = '<div class="admin-loading">加载分类…</div>';
+  } else if (!cats.length) {
+    inner = '<div class="admin-loading">该项目暂无小班分类</div>';
+  } else {
+    inner = cats.map(c => `
+      <div class="cat-dl-item">
+        <b>${escapeHtml(c)}</b>
+        <button class="btn-admin-action" data-action="cat-export-base" data-pid="${p.id}" data-cat="${escapeHtml(c)}">基本信息</button>
+        <button class="btn-admin-action" data-action="cat-export-samples" data-pid="${p.id}" data-cat="${escapeHtml(c)}">样地打包</button>
+        <button class="btn-admin-action" data-action="cat-export-tracks" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹打包</button>
+      </div>`).join('');
+  }
+  return `<tr class="cat-dl-row"><td colspan="5"><div class="cat-dl-wrap">${inner}</div></td></tr>`;
+}
+
+async function toggleCatDownload(pid) {
+  if (state.catDownloadPid === pid) {
+    state.catDownloadPid = null;
+  } else {
+    state.catDownloadPid = pid;
+    if (!state.projectCategories[pid]) {
+      try {
+        const j = await fetchJSON(`api/projects/${pid}/categories`);
+        state.projectCategories[pid] = j.categories || [];
+      } catch (e) {
+        state.projectCategories[pid] = [];
+      }
+    }
+  }
+  await loadProjectsTab();
+}
+
+function exportCatBase(pid, cat) {
+  window.open(`api/projects/${pid}/export_base?cat=${encodeURIComponent(cat)}`, '_blank');
+}
+
+function exportCatSamples(pid, cat) {
+  window.open(`api/projects/${pid}/export_samples?cat=${encodeURIComponent(cat)}`, '_blank');
+}
+
+function exportCatTracks(pid, cat) {
+  window.open(`api/projects/${pid}/export_tracks?cat=${encodeURIComponent(cat)}`, '_blank');
 }
 
 async function viewMembers(pid) {
@@ -831,9 +875,6 @@ app.addEventListener('click', async (e) => {
     case 'gdb-upload':
       await uploadGdb();
       break;
-    case 'gdb-delete':
-      await deleteGdb(t.dataset.gid);
-      break;
     case 'gdb-view-layers':
       await viewGdbLayers(t.dataset.gid);
       break;
@@ -862,6 +903,18 @@ app.addEventListener('click', async (e) => {
       break;
     case 'proj-export-tracks':
       exportTracks(t.dataset.pid);
+      break;
+    case 'proj-cat-download':
+      await toggleCatDownload(t.dataset.pid);
+      break;
+    case 'cat-export-base':
+      exportCatBase(t.dataset.pid, t.dataset.cat);
+      break;
+    case 'cat-export-samples':
+      exportCatSamples(t.dataset.pid, t.dataset.cat);
+      break;
+    case 'cat-export-tracks':
+      exportCatTracks(t.dataset.pid, t.dataset.cat);
       break;
     case 'proj-delete':
       await deleteProject(t.dataset.pid, t.dataset.name);

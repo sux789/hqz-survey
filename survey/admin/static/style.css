@@ -827,6 +827,32 @@ input, select, textarea, button {
 }
 .btn-admin-action:active { background: var(--panel-2); }
 
+/* ── 分类下载展开行（项目管理）── */
+.cat-dl-row > td {
+  background: var(--panel-2);
+  border-top: none;
+}
+.cat-dl-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.cat-dl-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.cat-dl-item > b {
+  font-size: 12px;
+  color: var(--green-d);
+  white-space: nowrap;
+}
+
 /* ── 小班批次栏 ── */
 .batchbar {
   flex: 0 0 auto;
