@@ -477,7 +477,9 @@ function renderProjectsTable() {
         <button class="btn-admin-action" data-action="proj-view-members" data-pid="${p.id}">成员</button>
         <button class="btn-admin-action" data-action="proj-export-base" data-pid="${p.id}">基本信息</button>
         <button class="btn-admin-action" data-action="proj-export-samples" data-pid="${p.id}">样地</button>
-        <button class="btn-admin-action" data-action="proj-export-tracks" data-pid="${p.id}">轨迹GPX</button>
+        <button class="btn-admin-action" data-action="proj-export-tracks" data-fmt="gpx" data-pid="${p.id}">轨迹GPX</button>
+        <button class="btn-admin-action" data-action="proj-export-tracks" data-fmt="kml" data-pid="${p.id}">轨迹KML</button>
+        <button class="btn-admin-action" data-action="proj-export-tracks" data-fmt="shp" data-pid="${p.id}">轨迹SHP</button>
         <button class="btn-admin-action" data-action="proj-cat-download" data-pid="${p.id}">${catLabel}</button>
         <button class="btn-admin-action warn" data-action="proj-delete" data-pid="${p.id}" data-name="${escapeHtml(p.name)}">删除</button>
       </td>
@@ -559,8 +561,8 @@ function exportSamples(pid) {
   window.open(`api/projects/${pid}/export_samples`, '_blank');
 }
 
-function exportTracks(pid) {
-  window.open(`api/projects/${pid}/export_tracks`, '_blank');
+function exportTracks(pid, fmt) {
+  window.open(`api/projects/${pid}/export_tracks?fmt=${fmt || 'gpx'}`, '_blank');
 }
 
 // ── 分类下载（展开行：每分类样地 Excel 一个文件 + 轨迹 GPX zip）──
@@ -904,7 +906,7 @@ app.addEventListener('click', async (e) => {
       exportSamples(t.dataset.pid);
       break;
     case 'proj-export-tracks':
-      exportTracks(t.dataset.pid);
+      exportTracks(t.dataset.pid, t.dataset.fmt);
       break;
     case 'proj-cat-download':
       await toggleCatDownload(t.dataset.pid);

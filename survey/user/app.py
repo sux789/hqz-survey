@@ -23,7 +23,6 @@
   POST /survey/api/subcompartments/rows/<row_id>/photos   照片
   GET  /survey/api/projects/<pid>/export_base     导出基本信息 xlsx（?cat=分类 仅该分类）
   GET  /survey/api/projects/<pid>/export_samples  导出样地 xlsx（?sc=小班id 仅该小班）
-  GET  /survey/api/projects/<pid>/export_tracks   导出轨迹 GPX zip
 """
 import os
 import sys
@@ -475,7 +474,8 @@ def api_save_photos(row_id):
 
 
 # ── 导出 ──
-# 用户端：基本信息（按当前分类）+ 样地（单小班/整项目）+ 轨迹 GPX。
+# 用户端：基本信息（按当前分类）+ 样地（单小班/整项目）。
+# 轨迹导出仅管理后台（/survey-admin），用户端不提供下载入口。
 
 @app.route("/api/projects/<pid>/export_base")
 @_login_required
@@ -524,38 +524,6 @@ def api_export_samples(pid):
             as_attachment=True,
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"导出失败: {e}"}), 500
-
-
-@app.route("/api/projects/<pid>/export_tracks")
-@_login_required
-def api_export_tracks(pid):
-    """导出项目全部轨迹 zip（ArcGIS 可直接识别）。
-
-    ?fmt=<gpx|kml|shp> 轨迹格式：gpx 每小班一个文件（默认）；
-    kml 单文件（Google Earth/奥维直接打开）；shp 单 shapefile
-    （每小班一条线要素 + 属性表，ArcGIS 10 双击直接打开）。
-    """
-    proj = storage.get_project(pid)
-    if not proj:
-        return jsonify({"error": "项目不存在"}), 404
-    fmt = request.args.get("fmt", "gpx").strip().lower()
-    try:
-        output, stats = exporter.export_tracks_zip(pid, fmt=fmt)
-        suffix = {"gpx": "GPX", "kml": "KML", "shp": "SHP"}.get(
-            stats.get("fmt", "gpx"), "GPX")
-        filename = f"{proj['name']}_轨迹{suffix}.zip"
-        return send_file(
-            output,
-            as_attachment=True,
-            download_name=filename,
-            mimetype="application/zip",
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 404

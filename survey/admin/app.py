@@ -24,7 +24,7 @@
   GET/POST/DELETE /admin/api/projects/<pid>/prefilled/<tid>  预填数据
   GET  /admin/api/projects/<pid>/export_base     导出基本信息 xlsx（?cat=分类 单 sheet 不打包）
   GET  /admin/api/projects/<pid>/export_samples  导出样地（?cat=分类：每小班一个 xlsx 打包 zip）
-  GET  /admin/api/projects/<pid>/export_tracks   导出轨迹 GPX zip（?cat=分类 仅该分类）
+  GET  /admin/api/projects/<pid>/export_tracks   导出轨迹 zip（?cat=分类 仅该分类；?fmt=gpx|kml|shp）
   GET  /admin/api/projects/<pid>/categories      项目含有的分类清单
 """
 import hashlib

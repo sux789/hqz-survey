@@ -410,7 +410,6 @@ function renderTopBar() {
     <div class="topbar-right">
       <button class="btn-icon help-btn" data-action="open-help" title="使用说明">?</button>
       ${(state.view === 'survey_grid' || state.view === 'samples') ? `<button class="btn-export" data-action="export-base" title="导出基本信息 Excel（当前项目${currentBaseExportCategory() ? '，仅「' + escapeHtml(currentBaseExportCategory()) + '」分类' : '，全部分类'}）">导出</button>` : ''}
-      ${(state.view === 'survey' || state.view === 'survey_grid' || state.view === 'samples') ? '<button class="btn-export" data-action="export-tracks" title="导出项目全部轨迹（GPX，按小班打包 ZIP）">轨迹</button>' : ''}
       <span class="user-display" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</span>
       <button class="btn-logout" data-action="logout" title="登出">登出</button>
     </div>
@@ -2173,24 +2172,6 @@ async function exportBase() {
   }
 }
 
-// 导出项目全部轨迹（GPX ZIP，按小班号有序打包）
-async function exportTracks() {
-  if (!state.project) { toast('请先选择项目'); return; }
-  toast('正在打包轨迹…', 1500);
-  try {
-    const res = await fetch(`api/projects/${state.project.id}/export_tracks`);
-    if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      throw new Error(e.error || `导出失败 (${res.status})`);
-    }
-    const blob = await res.blob();
-    const nativeSaved = await downloadExportFile(blob, `${state.project.name}_轨迹GPX.zip`);
-    if (!nativeSaved) toast('轨迹已导出');
-  } catch (e) {
-    toast('轨迹导出失败：' + e.message, 2500);
-  }
-}
-
 // ── GPS ──
 function getGPS() {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
@@ -3867,9 +3848,6 @@ app.addEventListener('click', async (e) => {
       break;
     case 'export-base':
       await exportBase();
-      break;
-    case 'export-tracks':
-      await exportTracks();
       break;
     case 'open-help':
       openHelpModal();
