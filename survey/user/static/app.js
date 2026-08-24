@@ -2217,12 +2217,18 @@ function gcj2wgs(lng, lat) {
   const g = wgs2gcj(lng, lat);
   return [lng * 2 - g[0], lat * 2 - g[1]];
 }
-// 定位结果统一入口：疑似网络点(GCJ-02)反算为 WGS-84，acc 精度存档、adj 打标，不丢弃任何点
+// 定位结果统一入口：网络源(GCJ-02)反算为 WGS-84，acc 精度存档、adj 打标，不丢弃任何点。
+// 网络源判定优先级：原生插件点携带的 provider（network=GCJ-02 必纠 / gps=WGS-84 必不纠）
+// > WebView 点无 provider，回退 accuracy≥50m 启发式
 function _gpsFix(coords) {
   let lng = coords.longitude, lat = coords.latitude;
   const acc = (typeof coords.accuracy === 'number' && isFinite(coords.accuracy)) ? Math.round(coords.accuracy) : null;
+  let isNet = null;
+  if (coords.provider === 'network') isNet = true;
+  else if (coords.provider === 'gps') isNet = false;
+  if (isNet === null) isNet = (acc !== null && acc >= NET_ACC_THRESHOLD);
   let adj = 0;
-  if (acc !== null && acc >= NET_ACC_THRESHOLD) {
+  if (isNet) {
     const w = gcj2wgs(lng, lat);
     lng = w[0]; lat = w[1]; adj = 1;
   }
@@ -2574,33 +2580,33 @@ async function scCheckin() {
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
-let _scWatchId = null;     // 记录中哨兵：'bg'=插件模式，数字=watchPosition id
+let _scWatchId = null;     // 记录中哨兵：'bg'=原生插件模式，数字=watchPosition id
 let _scTrackScId = null;   // 正在记录轨迹的小班 id
 let _scTrackRef = null;    // 轨迹点数组引用（scExtras 被替换后仍有效）
 let _scTrackTimer = null;  // 自动保存定时器
 let _scBgGeo = null;       // 后台定位插件句柄（原生壳内非空）
-let _scBgWatcherId = null; // 插件 watcher id（removeWatcher 停前台服务用）
 
-// 后台定位插件（@capacitor-community/background-geolocation）：
-// 原生壳内可用——watcher 带 backgroundTitle 时自动起前台服务，灭屏/后台持续出点；
-// 浏览器/旧 APK 无此插件，回退 navigator.geolocation。
+// 后台定位：自研原生插件 BgLocation（平台 LocationManager + location 型前台服务，
+// 通用方案——不依赖 Google Play Services，GMS 安卓与 HMS 鸿蒙均可用；社区插件
+// 依赖 gms fused 在无 GMS 设备上静默零回调，已弃用）。浏览器/旧 APK 无此插件，
+// 回退 navigator.geolocation（仅前台有效）。
+// 注意：RETURN_CALLBACK 方法经 nativeCallback 同步返回 callbackId（非 Promise），
+// 不可对其 .then/.catch；错误经回调第二参数 (null, err) 送回。
 function bgGeoPlugin() {
   try {
-    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundGeolocation) {
-      return window.Capacitor.Plugins.BackgroundGeolocation;
+    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BgLocation) {
+      return window.Capacitor.Plugins.BgLocation;
     }
   } catch (e) { /* 忽略 */ }
   return null;
 }
 
-// 停插件 watcher（停前台服务/通知）；容错：已停止或未就绪时静默
+// 停原生 watcher（停前台服务/通知）；容错：已停止或未就绪时静默
 function _bgStopWatcher() {
-  const id = _scBgWatcherId;
   const plugin = _scBgGeo;
-  _scBgWatcherId = null;
   _scBgGeo = null;
-  if (plugin && id !== null) {
-    plugin.removeWatcher({ id }).catch(() => {});
+  if (plugin) {
+    try { plugin.stopWatcher().catch(() => {}); } catch (e) { /* 忽略 */ }
   }
 }
 let _trackMap = null;     // Leaflet 地图实例
@@ -2756,37 +2762,35 @@ async function scTrackToggle() {
     _updateTrackMapState();
     if (err) handleGeoError(err);
   };
-  // 原生壳优先用后台定位插件（前台服务，灭屏/后台持续记录）；浏览器回退 watchPosition
+  // 原生壳优先自研 BgLocation 插件（前台服务，灭屏/后台持续记录）；
+  // 插件缺失/启动异常/浏览器 → 回退 watchPosition（仅前台有效）
   const bgGeo = bgGeoPlugin();
   if (bgGeo) {
-    _scWatchId = 'bg';   // 哨兵：记录中（watcher id 异步返回）
+    _scWatchId = 'bg';   // 哨兵：原生插件模式记录中
     _scBgGeo = bgGeo;
-    _scBgWatcherId = null;
-    bgGeo.addWatcher({
-      backgroundTitle: '验收轨迹记录中',
-      backgroundMessage: '正在后台记录调查轨迹，请保持定位开启',
-      requestPermissions: true,
-      stale: false,
-      distanceFilter: 0,
-    }, positionOrError => {
-      if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
-      if (positionOrError && positionOrError.error) { trackAbort(positionOrError.error); return; }
-      trackPush(_gpsFix({
-        longitude: positionOrError.longitude,
-        latitude: positionOrError.latitude,
-        accuracy: positionOrError.accuracy,
-      }));
-    }).then(id => {
-      // 竞态兜底：等待授权期间用户已点停止 → 立即注销，防前台服务/通知泄漏
-      if (_scWatchId === null || _scBgGeo !== bgGeo) {
-        bgGeo.removeWatcher({ id }).catch(() => {});
-      } else {
-        _scBgWatcherId = id;
-      }
-    }).catch(err => {
-      if (_scWatchId !== null) trackAbort(err);
-    });
-  } else {
+    try {
+      // nativeCallback 同步返回 callbackId；错误（含授权被拒）经回调 (null, err) 送回
+      bgGeo.startWatcher({
+        title: '验收轨迹记录中',
+        message: '正在后台记录调查轨迹，请保持定位开启',
+      }, (loc, err) => {
+        if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
+        if (err) { trackAbort(err); return; }
+        trackPush(_gpsFix({
+          longitude: loc.longitude,
+          latitude: loc.latitude,
+          accuracy: loc.accuracy,
+          provider: loc.provider,   // 'gps'=WGS-84 / 'network'=GCJ-02，精准纠偏
+        }));
+      });
+      toast('已启用后台持续定位（灭屏/后台均可记录）', 2200);
+    } catch (e) {
+      // 插件异常：回退 watchPosition（前台仍可记录）
+      _bgStopWatcher();
+      _scWatchId = null;
+    }
+  }
+  if (_scWatchId === null) {
     _scWatchId = navigator.geolocation.watchPosition(pos => {
       if (!_scTrackRef) return;
       trackPush(_gpsFix(pos.coords));

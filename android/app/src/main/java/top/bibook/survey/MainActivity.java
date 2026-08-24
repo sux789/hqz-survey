@@ -11,6 +11,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AppPermissionsPlugin.class);
+        registerPlugin(BgLocationPlugin.class);
         super.onCreate(savedInstanceState);
 
         // 强制所有导航留在 APP WebView 内，不调起系统浏览器（鸿蒙4.2会把
