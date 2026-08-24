@@ -578,7 +578,9 @@ function renderCatDownloadRow(p) {
         <b>${escapeHtml(c)}</b>
         <button class="btn-admin-action" data-action="cat-export-base" data-pid="${p.id}" data-cat="${escapeHtml(c)}">基本信息</button>
         <button class="btn-admin-action" data-action="cat-export-samples" data-pid="${p.id}" data-cat="${escapeHtml(c)}">样地打包</button>
-        <button class="btn-admin-action" data-action="cat-export-tracks" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹打包</button>
+        <button class="btn-admin-action" data-action="cat-export-tracks" data-fmt="gpx" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹GPX</button>
+        <button class="btn-admin-action" data-action="cat-export-tracks" data-fmt="kml" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹KML</button>
+        <button class="btn-admin-action" data-action="cat-export-tracks" data-fmt="shp" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹SHP</button>
       </div>`).join('');
   }
   return `<tr class="cat-dl-row"><td colspan="5"><div class="cat-dl-wrap">${inner}</div></td></tr>`;
@@ -609,8 +611,8 @@ function exportCatSamples(pid, cat) {
   window.open(`api/projects/${pid}/export_samples?cat=${encodeURIComponent(cat)}`, '_blank');
 }
 
-function exportCatTracks(pid, cat) {
-  window.open(`api/projects/${pid}/export_tracks?cat=${encodeURIComponent(cat)}`, '_blank');
+function exportCatTracks(pid, cat, fmt) {
+  window.open(`api/projects/${pid}/export_tracks?cat=${encodeURIComponent(cat)}&fmt=${fmt}`, '_blank');
 }
 
 async function viewMembers(pid) {
@@ -914,7 +916,7 @@ app.addEventListener('click', async (e) => {
       exportCatSamples(t.dataset.pid, t.dataset.cat);
       break;
     case 'cat-export-tracks':
-      exportCatTracks(t.dataset.pid, t.dataset.cat);
+      exportCatTracks(t.dataset.pid, t.dataset.cat, t.dataset.fmt || 'gpx');
       break;
     case 'proj-delete':
       await deleteProject(t.dataset.pid, t.dataset.name);

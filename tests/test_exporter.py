@@ -638,3 +638,80 @@ class TestExportTracks:
         }, forest_compartment=3, subcompartment=9, category="退化林修复", row_index=3)
         with pytest.raises(ValueError, match="暂无轨迹"):
             exporter.export_tracks_zip(pid, category="退化林修复")
+
+    def test_kml_single_file(self, sample_data):
+        """KML：全部小班合并单文件，每小班一个 Placemark（LineString）。"""
+        import zipfile
+        from datetime import date
+        pid = sample_data["pid"]
+        sc3 = _insert_sc_row(pid, {
+            "乡镇": "测试乡", "村": "测试村", "林班": 2, "小班": 7, "调查小班号": 7,
+        }, forest_compartment=2, subcompartment=7, category="封山育林", row_index=2)
+        # sc1 两点成线；sc3 单点 → KML 跳过
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+            {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
+        ])
+        storage.save_track(sc3, [
+            {"lng": 102.3, "lat": 25.7, "t": "2026-08-21T11:00:00"},
+        ])
+        buf, stats = exporter.export_tracks_zip(pid, fmt="kml")
+        assert stats["fmt"] == "kml" and stats["tracks"] == 1
+        with zipfile.ZipFile(buf) as zf:
+            assert zf.namelist() == ["tracks/测试项目.kml"]  # 项目名主干
+            kml = zf.read("tracks/测试项目.kml").decode("utf-8")
+        assert kml.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+        assert '<kml xmlns="http://www.opengis.net/kml/2.2">' in kml
+        assert kml.count("<Placemark>") == 1          # 单点轨迹跳过
+        assert "102.1,25.6 102.11,25.61" in kml       # 坐标串
+        assert "分类: 人工造林" in kml and "点数: 2" in kml
+
+    def test_shp_single_file(self, sample_data):
+        """SHP：单 shapefile（每小班一条线要素 + 属性表），geopandas 读回验证。"""
+        import zipfile
+        pid = sample_data["pid"]
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+            {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
+            {"lng": 102.12, "lat": 25.62, "t": "2026-08-21T10:02:00"},
+        ])
+        buf, stats = exporter.export_tracks_zip(pid, fmt="shp")
+        assert stats["fmt"] == "shp" and stats["tracks"] == 1
+        import geopandas as gpd
+        import tempfile, os
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            # shapefile 组件齐全（.shp/.shx/.dbf/.prj/.cpg）
+            assert any(n.endswith(".shp") for n in names)
+            assert any(n.endswith(".dbf") for n in names)
+            assert any(n.endswith(".prj") for n in names)
+            with tempfile.TemporaryDirectory() as td:
+                for n in names:
+                    zf.extract(n, td)
+                stem = next(n for n in names if n.endswith(".shp"))
+                gdf = gpd.read_file(os.path.join(td, stem))
+        assert len(gdf) == 1
+        row = gdf.iloc[0]
+        assert row.geometry.geom_type == "LineString"
+        assert round(row.geometry.coords[0][0], 4) == 102.1
+        assert row["category"] == "人工造林"
+        assert row["township"] == "测试乡" and row["village"] == "测试村"
+        assert row["pts"] == 3
+        assert str(row["start"]).startswith("2026-08-21")
+        assert gdf.crs is not None and gdf.crs.to_epsg() == 4326  # WGS84
+
+    def test_fmt_invalid_raises(self, sample_data):
+        """非法 fmt → ValueError。"""
+        with pytest.raises(ValueError, match="不支持的轨迹格式"):
+            exporter.export_tracks_zip(sample_data["pid"], fmt="dwg")
+
+    def test_kml_all_single_point_raises(self, sample_data):
+        """全部轨迹不足 2 点 → ValueError（线要素无法生成）。"""
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+        ])
+        with pytest.raises(ValueError, match="不足 2 个有效点"):
+            exporter.export_tracks_zip(sample_data["pid"], fmt="kml")
+        # GPX 不受单点限制
+        buf, stats = exporter.export_tracks_zip(sample_data["pid"], fmt="gpx")
+        assert stats["tracks"] == 1

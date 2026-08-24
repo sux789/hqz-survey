@@ -689,18 +689,23 @@ def api_export_samples(pid):
 @app.route("/api/projects/<pid>/export_tracks")
 @_admin_required
 def api_export_tracks(pid):
-    """导出项目轨迹为 GPX zip（ArcGIS 可直接识别）。
+    """导出项目轨迹 zip（ArcGIS 可直接识别）。
 
     ?cat=<分类> 仅导出该分类小班的轨迹（项目管理「分类下载」）。
+    ?fmt=<gpx|kml|shp> 轨迹格式：gpx 每小班一个文件（默认）；
+      kml 单文件（Google Earth/奥维直接打开）；shp 单 shapefile
+      （每小班一条线要素 + 属性表，ArcGIS 10 双击直接打开，推荐）。
     """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
     cat = request.args.get("cat", "").strip()
+    fmt = request.args.get("fmt", "gpx").strip().lower()
     try:
-        output, stats = exporter.export_tracks_zip(pid, category=cat or None)
-        filename = (f"{cat}-{_dl_year(proj)}-轨迹.zip" if cat
-                    else f"{proj['name']}_轨迹GPX.zip")
+        output, stats = exporter.export_tracks_zip(pid, category=cat or None, fmt=fmt)
+        suffix = {"gpx": "", "kml": "KML", "shp": "SHP"}.get(stats.get("fmt", "gpx"), "")
+        filename = (f"{cat}-{_dl_year(proj)}-轨迹{suffix}.zip" if cat
+                    else f"{proj['name']}_轨迹{suffix or 'GPX'}.zip")
         return send_file(
             output,
             as_attachment=True,

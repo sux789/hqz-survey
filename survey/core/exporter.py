@@ -1022,46 +1022,213 @@ def _track_gpx(track, name):
     )
 
 
-def export_tracks_zip(pid, category=None):
-    """导出项目小班轨迹为 GPX，打包 zip 返回。
+def _track_coords(track):
+    """轨迹点 → [(lng, lat), ...]（跳过无效点，WGS84）。"""
+    coords = []
+    for p in track:
+        try:
+            coords.append((float(p.get("lng")), float(p.get("lat"))))
+        except (TypeError, ValueError):
+            continue
+    return coords
 
-    每个有轨迹的小班一个 .gpx 文件（tracks/ 目录下），
-    ArcGIS Pro 直接拖入即可转要素（GPX To Features）。
+
+def _track_times(track):
+    """轨迹点时间戳列表（非空 t，保持顺序）。"""
+    return [str(p.get("t") or "").strip() for p in track
+            if str(p.get("t") or "").strip()]
+
+
+def _proj_year(proj):
+    """项目年度：项目名「(2023 年度)」正则 → 当前年（与 admin _dl_year 同口径）。"""
+    m = re.search(r"(\d{4})\s*年度", (proj or {}).get("name") or "")
+    return m.group(1) if m else str(_date.today().year)
+
+
+def _dl_stem(proj, category):
+    """单文件轨迹（KML/SHP）文件主干：{分类}-{年度} 或 项目名（清路径非法字符）。"""
+    stem = f"{category}-{_proj_year(proj)}" if category else \
+        (proj or {}).get("name") or "轨迹"
+    return re.sub(r'[\\/:*?"<>|]+', "_", str(stem)).strip() or "轨迹"
+
+
+def _track_desc(sc_row, track):
+    """KML Placemark 描述：人类可读的小班摘要。"""
+    data = sc_row.get("data") if isinstance(sc_row.get("data"), dict) else {}
+    ts = _track_times(track)
+    bits = [
+        f"分类: {sc_row.get('category') or '—'}",
+        f"小班: {sc_row.get('subcompartment_label') or _sc_file_stem(sc_row)}",
+        f"乡镇: {data.get('乡镇') or '—'}",
+        f"村: {data.get('村') or '—'}",
+        f"点数: {len(track)}",
+    ]
+    if ts:
+        bits.append(f"起止: {ts[0]} ~ {ts[-1]}")
+    return " | ".join(bits)
+
+
+def _track_kml(doc_name, entries):
+    """entries = [(name, desc, coords)] → KML 2.2 文本。
+
+    全部小班各一个 Placemark（LineString）；ArcGIS 用 KML To Layer
+    转要素，Google Earth / 奥维可直接打开。
+    """
+    from xml.sax.saxutils import escape as _xml_escape
+    parts = []
+    for name, desc, coords in entries:
+        co = " ".join(f"{lng},{lat}" for lng, lat in coords)
+        d = (f"\n    <description>{_xml_escape(desc)}</description>"
+             if desc else "")
+        parts.append(
+            f"  <Placemark>\n    <name>{_xml_escape(name)}</name>{d}\n"
+            f"    <LineString><tessellate>1</tessellate>"
+            f"<coordinates>{co}</coordinates></LineString>\n  </Placemark>")
+    if not parts:
+        return ""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
+        f'  <Document>\n    <name>{_xml_escape(doc_name)}</name>\n'
+        + "\n".join(parts) + "\n  </Document>\n</kml>\n"
+    )
+
+
+def _track_shp_props(sc_row, track):
+    """小班 → shapefile 属性行。字段名限 ASCII ≤10 字符（DBF 规范，ArcGIS 10 兼容）。"""
+    data = sc_row.get("data") if isinstance(sc_row.get("data"), dict) else {}
+    ts = _track_times(track)
+    try:
+        fc = int(sc_row.get("forest_compartment") or 0)
+    except (TypeError, ValueError):
+        fc = 0
+    try:
+        sc = int(sc_row.get("subcompartment") or 0)
+    except (TypeError, ValueError):
+        sc = None
+    return {
+        "name": sc_row.get("subcompartment_label") or _sc_file_stem(sc_row),
+        "category": sc_row.get("category") or "",
+        "year": _sc_year(sc_row),
+        "fc": fc,
+        "sc": sc,
+        "township": data.get("乡镇") or "",
+        "village": data.get("村") or "",
+        "pts": len(track),
+        "start": ts[0] if ts else "",
+        "end": ts[-1] if ts else "",
+    }
+
+
+def _write_tracks_shp(entries, out_path):
+    """entries = [(props, coords)] → 单 shapefile（每小班一条 LineString，WGS84）。
+
+    UTF-8 编码（.cpg 随附），ArcGIS 10.1+ / Pro / QGIS 均可正确读中文属性值。
+    """
+    import geopandas as gpd
+    from shapely.geometry import LineString
+    rows = [props for props, _ in entries]
+    geoms = [LineString(coords) for _, coords in entries]
+    gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
+    gdf.to_file(out_path, encoding="utf-8")
+
+
+def export_tracks_zip(pid, category=None, fmt="gpx"):
+    """导出项目小班轨迹，打包 zip 返回。
+
+    fmt:
+      gpx（默认）— 每个有轨迹的小班一个 .gpx（tracks/ 目录，文件名与
+                   Excel 轨迹列同源）；ArcGIS 用 GPX To Features 转要素。
+      kml        — 单个 .kml（每小班一个 Placemark）；Google Earth/奥维
+                   直接打开，ArcGIS 用 KML To Layer 转要素。
+      shp        — 单个 shapefile（每小班一条 LineString 要素 + 属性表：
+                   小班/分类/年度/乡镇/村/点数/起止时间），WGS84，
+                   ArcGIS 10 双击直接打开（推荐）。
+
+    KML/SHP 为线要素格式：不足 2 个有效点的轨迹跳过（GPX 不受影响）。
 
     Args:
         pid: 项目 ID
         category: 可选，仅导出该分类小班的轨迹（admin 分类下载）。
+        fmt: gpx / kml / shp。
 
     Returns:
-        (BytesIO(zip), {"gpx": n, "total_points": m})
+        (BytesIO(zip), {"fmt": str, "files": n, "tracks": n, "total_points": m})
     """
     import zipfile
     from xml.sax.saxutils import escape as _xml_escape
 
+    fmt = (fmt or "gpx").strip().lower()
+    if fmt not in ("gpx", "kml", "shp"):
+        raise ValueError(f"不支持的轨迹格式: {fmt}")
+
     sc_rows = storage.list_project_subcompartment_rows(pid, category=category)
     sc_rows.sort(key=_sc_sort_key)  # 按调查小班号排序，与 Excel 导出一致
-    buf = io.BytesIO()
-    gpx_count = 0
-    total_pts = 0
-    used = {}
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for sc_row in sc_rows:
-            track = (storage.get_extras(sc_row["id"]) or {}).get("track") or []
-            if not track:
-                continue
-            # 文件名与 Excel 轨迹列同源（_track_gpx_filename）；
-            # 同名冲突（跨村重复林班小班号）追加序号
-            base = _sc_file_base(sc_row)
-            k = used.get(base, 0) + 1
-            used[base] = k
-            fname = f"{base}.gpx" if k == 1 else f"{base}_{k}.gpx"
-            gpx = _track_gpx(track, _xml_escape(sc_row.get("subcompartment_label") or fname))
-            if not gpx:
-                continue
-            zf.writestr(f"tracks/{fname}", gpx)
-            gpx_count += 1
-            total_pts += len(track)
-    if gpx_count == 0:
+    # 收集有轨迹的小班（同名冲突追序号，与 GPX 文件名规则一致）
+    items, used = [], {}
+    for sc_row in sc_rows:
+        track = (storage.get_extras(sc_row["id"]) or {}).get("track") or []
+        if not track:
+            continue
+        base = _sc_file_base(sc_row)
+        k = used.get(base, 0) + 1
+        used[base] = k
+        items.append((sc_row, track, base if k == 1 else f"{base}_{k}"))
+    if not items:
         raise ValueError("该项目暂无轨迹数据")
-    buf.seek(0)
-    return buf, {"gpx": gpx_count, "total_points": total_pts}
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if fmt == "gpx":
+            files, total_pts = 0, 0
+            for sc_row, track, base in items:
+                gpx = _track_gpx(
+                    track, _xml_escape(sc_row.get("subcompartment_label") or base))
+                if not gpx:
+                    continue
+                zf.writestr(f"tracks/{base}.gpx", gpx)
+                files += 1
+                total_pts += len(track)
+            if files == 0:
+                raise ValueError("该项目暂无轨迹数据")
+            buf.seek(0)
+            return buf, {"fmt": "gpx", "files": files, "tracks": files,
+                         "total_points": total_pts}
+
+        # kml / shp：单文件，全部小班合并
+        proj = storage.get_project(pid) or {}
+        stem = _dl_stem(proj, category)
+        entries = []
+        for sc_row, track, base in items:
+            coords = _track_coords(track)
+            if len(coords) < 2:
+                continue  # 单点无法构成线要素
+            entries.append((sc_row, track, base, coords))
+        if not entries:
+            raise ValueError("轨迹均不足 2 个有效点，无法生成线要素")
+        total_pts = sum(len(c) for *_, c in entries)
+
+        if fmt == "kml":
+            kml = _track_kml(stem, [
+                (sc_row.get("subcompartment_label") or base,
+                 _track_desc(sc_row, track), coords)
+                for sc_row, track, base, coords in entries])
+            zf.writestr(f"tracks/{stem}.kml", kml)
+            buf.seek(0)
+            return buf, {"fmt": "kml", "files": 1, "tracks": len(entries),
+                         "total_points": total_pts}
+
+        # shp：临时目录写出全部组件文件（.shp/.shx/.dbf/.prj/.cpg）再入 zip
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            _write_tracks_shp(
+                [(_track_shp_props(sc_row, track), coords)
+                 for sc_row, track, base, coords in entries],
+                os.path.join(td, stem + ".shp"))
+            for fn in sorted(os.listdir(td)):
+                with open(os.path.join(td, fn), "rb") as f:
+                    zf.writestr(f"tracks/{fn}", f.read())
+        buf.seek(0)
+        return buf, {"fmt": "shp", "files": 1, "tracks": len(entries),
+                     "total_points": total_pts}
