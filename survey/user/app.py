@@ -69,6 +69,20 @@ def _api_no_store(resp):
     return resp
 
 
+@app.after_request
+def _purge_prefixed_session_cookie(resp):
+    """清除历史遗留的 Path=/survey 同名 session cookie（修复前由本应用写出）：
+    它在登出后仍残留，且按"最长路径优先"发送规则遮蔽 Path=/ 的新登录会话。
+    每次响应都下发删除指令，老设备首次访问即自愈。"""
+    prefix = app.config.get("APPLICATION_ROOT")
+    if prefix:
+        resp.headers.add(
+            "Set-Cookie",
+            f"session=; Path={prefix}; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0",
+        )
+    return resp
+
+
 # 可压缩类型：文本类静态资源与 JSON（xlsx/zip/图片等二进制不压）
 _GZIP_TYPES = ("text/", "application/javascript", "application/x-javascript",
                "application/json", "image/svg+xml")
@@ -562,6 +576,14 @@ def create_app(prefix='/survey'):
     if prefix:
         app.config['APPLICATION_ROOT'] = prefix
         app.static_url_path = f"{prefix}/static"
+    # session cookie 必须与 forest-data 登录写出的那条（Path=/）完全同一条：
+    # Flask 默认 SESSION_COOKIE_PATH=APPLICATION_ROOT（/survey），本应用每次
+    # 响应都会额外写出第二条同名 cookie（Path=/survey）。登出只清 Path=/ 的
+    # 那条，残留的前缀 cookie 按浏览器"最长路径优先"规则遮蔽新登录会话，
+    # 导致换账号后 api/me 仍读到前一个用户（顶栏 user-display 显示旧用户）。
+    app.config['SESSION_COOKIE_PATH'] = '/'
+    # 只读会话：不刷新不回写，避免把（可能被遗留 cookie 污染的）会话写回主 cookie
+    app.config['SESSION_REFRESH_EACH_REQUEST'] = False
     return app
 
 

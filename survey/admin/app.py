@@ -71,6 +71,20 @@ def _payload_too_large(_e):
     return jsonify({"error": "文件过大"}), 413
 
 
+@app.after_request
+def _purge_prefixed_session_cookie(resp):
+    """清除历史遗留的 Path=/survey-admin 同名 session cookie（修复前由本应用写出）：
+    它在登出后仍残留，且按"最长路径优先"发送规则遮蔽 Path=/ 的新登录会话，
+    导致换账号后仍以前一个用户身份操作。每次响应下发删除指令，老设备自愈。"""
+    prefix = app.config.get("APPLICATION_ROOT")
+    if prefix:
+        resp.headers.add(
+            "Set-Cookie",
+            f"session=; Path={prefix}; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0",
+        )
+    return resp
+
+
 # ── 页面 ──
 
 @app.route("/")
@@ -769,6 +783,12 @@ def create_app(prefix='/survey-admin'):
     if prefix:
         app.config['APPLICATION_ROOT'] = prefix
         app.static_url_path = f"{prefix}/static"
+    # session cookie 必须与 forest-data 登录写出的那条（Path=/）完全同一条：
+    # Flask 默认 SESSION_COOKIE_PATH=APPLICATION_ROOT（/survey-admin）会额外
+    # 写出第二条同名 cookie，登出不清理且最长路径优先发送 → 换账号后仍读到
+    # 前一个用户（详见 user 端 create_app 同款注释）
+    app.config['SESSION_COOKIE_PATH'] = '/'
+    app.config['SESSION_REFRESH_EACH_REQUEST'] = False
     return app
 
 
