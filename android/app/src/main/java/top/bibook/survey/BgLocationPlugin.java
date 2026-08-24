@@ -79,6 +79,7 @@ public class BgLocationPlugin extends Plugin {
     private void begin(PluginCall call) {
         call.setKeepAlive(true);
         watcherCall = call;
+        lastGpsTime = System.currentTimeMillis();  // 启动宽限：前 30s 不放网络点，等 GPS 首个 fix
         locationManager = (LocationManager) getContext().getSystemService(Context.LOCATION_SERVICE);
         if (locationManager == null) {
             call.reject("设备无定位服务", "NO_PROVIDER");
@@ -91,13 +92,16 @@ public class BgLocationPlugin extends Plugin {
                 if (watcherCall == null) return;
                 // 精度策略（GPS 优先）：
                 // 1) GPS 点照发并刷新 lastGpsTime；
-                // 2) 网络点仅当 GPS 超过 10 秒无点时才转发（低精度网络点与 GPS 点
-                //    交叉混采是轨迹锯齿的主因）；基站粗定位(>500m)直接丢弃。
+                // 2) 网络点仅当 GPS 超过 30 秒无点时才转发——该阈值同时覆盖启动期
+                //    （lastGpsTime 初始=启动时刻）：前 30 秒只等 GPS 首个 fix
+                //    （冷启动 TTFF 30s~几分钟，网络点秒回但误差几百米起，
+                //    若放行必成偏移首点）；GPS 中途失效同样 30 秒后兜底。
+                //    基站粗定位(>500m)直接丢弃。
                 boolean fromGps = LocationManager.GPS_PROVIDER.equals(location.getProvider());
                 if (fromGps) {
                     lastGpsTime = System.currentTimeMillis();
                 } else {
-                    if (System.currentTimeMillis() - lastGpsTime < 10_000L) return;
+                    if (System.currentTimeMillis() - lastGpsTime < 30_000L) return;
                     if (location.hasAccuracy() && location.getAccuracy() > 500f) return;
                 }
                 JSObject o = new JSObject();

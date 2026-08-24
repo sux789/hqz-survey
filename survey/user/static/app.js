@@ -2798,19 +2798,24 @@ async function scTrackToggle() {
       trackAbort(err);
     }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
   }
-  // 先立即取一个点：GPS 冷启动时 watch 回调可能数十秒不来，避免"记录中却 0 点"
-  navigator.geolocation.getCurrentPosition(pos => {
-    if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
-    if (!_scTrackRef.length) {
-      const fix = _gpsFix(pos.coords);
-      const pt = { lng: fix.lng, lat: fix.lat, t: new Date().toISOString() };
-      if (fix.acc !== null) pt.acc = fix.acc;
-      if (fix.adj) pt.adj = 1;
-      _scTrackRef.push(pt);
-      if (state.scExtras) state.scExtras.track = _scTrackRef;
-      _updateTrackMapState();
-    }
-  }, () => {}, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  // 立即取首点仅 watchPosition 回退模式需要（GPS 冷启动时 watch 回调可能数十秒不来）。
+  // 原生插件模式跳过：WebView 秒回的点常为网络定位且无 provider 标记（accuracy<50m
+  // 不触发启发式纠偏，GCJ-02 原样入库），必成偏移几百米的首点；首点交给原生层
+  // 30 秒 GPS 优先宽限策略出。
+  if (_scWatchId !== 'bg') {
+    navigator.geolocation.getCurrentPosition(pos => {
+      if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
+      if (!_scTrackRef.length) {
+        const fix = _gpsFix(pos.coords);
+        const pt = { lng: fix.lng, lat: fix.lat, t: new Date().toISOString() };
+        if (fix.acc !== null) pt.acc = fix.acc;
+        if (fix.adj) pt.adj = 1;
+        _scTrackRef.push(pt);
+        if (state.scExtras) state.scExtras.track = _scTrackRef;
+        _updateTrackMapState();
+      }
+    }, () => {}, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  }
   _renderScPanel();
   _updateTrackMapState();
 }
