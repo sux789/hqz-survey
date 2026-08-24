@@ -2172,20 +2172,78 @@ async function exportBase() {
   }
 }
 
+// ── 坐标基准转换（GCJ-02 火星坐标 ↔ WGS-84）──
+// 国内网络定位（基站/WiFi，无 GMS 的华为/鸿蒙设备林下 GPS 失效时常见）返回 GCJ-02，
+// GPS 返回 WGS-84。库内与导出统一 WGS-84：精度差(≥50m)的定位点视为网络源，
+// 反算纠偏并打标记，全部保留不丢弃。
+const _GCJ_PI = 3.14159265358979324;
+const _GCJ_A = 6378245.0;
+const _GCJ_EE = 0.00669342162296594323;
+const NET_ACC_THRESHOLD = 50;  // accuracy ≥ 50m 视为网络定位（GCJ-02）
+
+function _tLat(x, y) {
+  let r = -100 + 2 * x + 3 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  r += (20 * Math.sin(6 * x * _GCJ_PI) + 20 * Math.sin(2 * x * _GCJ_PI)) * 2 / 3;
+  r += (20 * Math.sin(y * _GCJ_PI) + 40 * Math.sin(y / 3 * _GCJ_PI)) * 2 / 3;
+  r += (160 * Math.sin(y / 12 * _GCJ_PI) + 320 * Math.sin(y * _GCJ_PI / 30)) * 2 / 3;
+  return r;
+}
+function _tLng(x, y) {
+  let r = 300 + x + 2 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  r += (20 * Math.sin(6 * x * _GCJ_PI) + 20 * Math.sin(2 * x * _GCJ_PI)) * 2 / 3;
+  r += (20 * Math.sin(x * _GCJ_PI) + 40 * Math.sin(x / 3 * _GCJ_PI)) * 2 / 3;
+  r += (150 * Math.sin(x / 12 * _GCJ_PI) + 300 * Math.sin(x / 30 * _GCJ_PI)) * 2 / 3;
+  return r;
+}
+function _outOfChina(lng, lat) {
+  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+}
+// WGS-84 → GCJ-02（仅显示用：高德瓦片是 GCJ-02 基准）
+function wgs2gcj(lng, lat) {
+  if (_outOfChina(lng, lat)) return [lng, lat];
+  let dLat = _tLat(lng - 105, lat - 35);
+  let dLng = _tLng(lng - 105, lat - 35);
+  const radLat = lat / 180 * _GCJ_PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - _GCJ_EE * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180) / ((_GCJ_A * (1 - _GCJ_EE)) / (magic * sqrtMagic) * _GCJ_PI);
+  dLng = (dLng * 180) / (_GCJ_A / sqrtMagic * Math.cos(radLat) * _GCJ_PI);
+  return [lng + dLng, lat + dLat];
+}
+// GCJ-02 → WGS-84（一次反算，误差约 1~2m，远小于 300~700m 偏移）
+function gcj2wgs(lng, lat) {
+  if (_outOfChina(lng, lat)) return [lng, lat];
+  const g = wgs2gcj(lng, lat);
+  return [lng * 2 - g[0], lat * 2 - g[1]];
+}
+// 定位结果统一入口：疑似网络点(GCJ-02)反算为 WGS-84，acc 精度存档、adj 打标，不丢弃任何点
+function _gpsFix(coords) {
+  let lng = coords.longitude, lat = coords.latitude;
+  const acc = (typeof coords.accuracy === 'number' && isFinite(coords.accuracy)) ? Math.round(coords.accuracy) : null;
+  let adj = 0;
+  if (acc !== null && acc >= NET_ACC_THRESHOLD) {
+    const w = gcj2wgs(lng, lat);
+    lng = w[0]; lat = w[1]; adj = 1;
+  }
+  return { lng: lng.toFixed(6), lat: lat.toFixed(6), acc, adj };
+}
+
 // ── GPS ──
 function getGPS() {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
   toast('正在获取定位…', 1500);
   navigator.geolocation.getCurrentPosition(pos => {
-    const lng = pos.coords.longitude.toFixed(6);
-    const lat = pos.coords.latitude.toFixed(6);
+    const fix = _gpsFix(pos.coords);
+    const lng = fix.lng;
+    const lat = fix.lat;
     state.formData.longitude = lng;
     state.formData.latitude = lat;
     const lngEl = qs('[data-gps-val="longitude"]');
     const latEl = qs('[data-gps-val="latitude"]');
     if (lngEl) lngEl.textContent = lng;
     if (latEl) latEl.textContent = lat;
-    toast('定位成功');
+    toast(fix.adj ? '定位成功（网络定位已纠偏）' : '定位成功');
   }, err => {
     handleGeoError(err);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
@@ -2196,8 +2254,9 @@ function getSampleGPS(sampleKey, idx) {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
   toast('正在获取定位…', 1500);
   navigator.geolocation.getCurrentPosition(pos => {
-    const lng = pos.coords.longitude.toFixed(6);
-    const lat = pos.coords.latitude.toFixed(6);
+    const fix = _gpsFix(pos.coords);
+    const lng = fix.lng;
+    const lat = fix.lat;
     const arr = state.formData[sampleKey];
     if (!Array.isArray(arr) || !arr[idx]) { toast('定位成功但样地已失效，请重试'); return; }
     arr[idx].x = lng;
@@ -2207,7 +2266,7 @@ function getSampleGPS(sampleKey, idx) {
     const yEl = qs(`[data-sample-field="y"][data-sample-key="${sampleKey}"][data-sample-idx="${idx}"]`);
     if (xEl) xEl.value = lng;
     if (yEl) yEl.value = lat;
-    toast('定位成功');
+    toast(fix.adj ? '定位成功（网络定位已纠偏）' : '定位成功');
   }, err => {
     handleGeoError(err);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
@@ -2378,15 +2437,16 @@ async function quickCheckin(scId) {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
   toast('正在获取定位…', 1500);
   navigator.geolocation.getCurrentPosition(async pos => {
-    const lng = pos.coords.longitude.toFixed(6);
-    const lat = pos.coords.latitude.toFixed(6);
+    const fix = _gpsFix(pos.coords);
+    const lng = fix.lng;
+    const lat = fix.lat;
     try {
       await fetchJSON(`api/subcompartments/rows/${scId}/checkin`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lng, lat }),
       });
-      toast('✓ 打卡成功');
+      toast('✓ 打卡成功' + (fix.adj ? '（网络定位已纠偏）' : ''));
       await fillSampleCoords(scId, lng, lat);
       const row = qs(`.sc-list-row[data-scid="${scId}"]`);
       if (row) {
@@ -2489,8 +2549,9 @@ async function scCheckin() {
   if (!navigator.geolocation) { toast('设备不支持定位'); return; }
   toast('正在获取定位…', 1500);
   navigator.geolocation.getCurrentPosition(async pos => {
-    const lng = pos.coords.longitude.toFixed(6);
-    const lat = pos.coords.latitude.toFixed(6);
+    const fix = _gpsFix(pos.coords);
+    const lng = fix.lng;
+    const lat = fix.lat;
     try {
       const r = await fetchJSON(`api/subcompartments/rows/${scId}/checkin`, {
         method: 'POST',
@@ -2503,7 +2564,7 @@ async function scCheckin() {
         state.scExtras.checkin_lat = r.checkin_lat;
       }
       _renderScPanel();
-      toast('打卡成功');
+      toast('打卡成功' + (fix.adj ? '（网络定位已纠偏）' : ''));
       await fillSampleCoords(scId, lng, lat);
     } catch (e) {
       toast('打卡失败：' + e.message, 2500);
@@ -2513,10 +2574,35 @@ async function scCheckin() {
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
-let _scWatchId = null;
+let _scWatchId = null;     // 记录中哨兵：'bg'=插件模式，数字=watchPosition id
 let _scTrackScId = null;   // 正在记录轨迹的小班 id
 let _scTrackRef = null;    // 轨迹点数组引用（scExtras 被替换后仍有效）
 let _scTrackTimer = null;  // 自动保存定时器
+let _scBgGeo = null;       // 后台定位插件句柄（原生壳内非空）
+let _scBgWatcherId = null; // 插件 watcher id（removeWatcher 停前台服务用）
+
+// 后台定位插件（@capacitor-community/background-geolocation）：
+// 原生壳内可用——watcher 带 backgroundTitle 时自动起前台服务，灭屏/后台持续出点；
+// 浏览器/旧 APK 无此插件，回退 navigator.geolocation。
+function bgGeoPlugin() {
+  try {
+    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundGeolocation) {
+      return window.Capacitor.Plugins.BackgroundGeolocation;
+    }
+  } catch (e) { /* 忽略 */ }
+  return null;
+}
+
+// 停插件 watcher（停前台服务/通知）；容错：已停止或未就绪时静默
+function _bgStopWatcher() {
+  const id = _scBgWatcherId;
+  const plugin = _scBgGeo;
+  _scBgWatcherId = null;
+  _scBgGeo = null;
+  if (plugin && id !== null) {
+    plugin.removeWatcher({ id }).catch(() => {});
+  }
+}
 let _trackMap = null;     // Leaflet 地图实例
 let _trackLayer = null;   // 轨迹折线图层
 let _trackMarker = null;  // 当前位置标记
@@ -2554,7 +2640,7 @@ function openTrackMap() {
   // 初始化 Leaflet 地图
   const container = qs('#trackMapContainer');
   _trackMap = L.map(container, { zoomControl: true, attributionControl: false }).setView([0, 0], 13);
-  // 高德瓦片（国内访问快，无偏移问题用 WGS84 经纬度，会有轻微偏移但可接受）
+  // 高德瓦片（GCJ-02 基准）：库内轨迹为 WGS-84，画图时经 wgs2gcj 转换对齐瓦片
   L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
     subdomains: ['1', '2', '3', '4'],
     maxZoom: 18,
@@ -2577,7 +2663,11 @@ function openTrackMap() {
 function _drawTrackLine() {
   if (!_trackMap || !state.scExtras || !state.scExtras.track) return;
   const track = state.scExtras.track;
-  const latlngs = track.filter(p => p.lat && p.lng).map(p => [parseFloat(p.lat), parseFloat(p.lng)]);
+  // 库内 WGS-84 → 高德瓦片 GCJ-02（仅显示转换，不改库内数据）
+  const latlngs = track.filter(p => p.lat && p.lng).map(p => {
+    const g = wgs2gcj(parseFloat(p.lng), parseFloat(p.lat));
+    return [g[1], g[0]];
+  });
   if (!latlngs.length) return;
 
   if (_trackLayer) {
@@ -2638,37 +2728,81 @@ async function scTrackToggle() {
     const ok = await _postTrack(_scTrackScId, _scTrackRef, true);
     if (ok) savedLen = _scTrackRef.length;
   }, 15000);
-  _scWatchId = navigator.geolocation.watchPosition(pos => {
-    const pt = {
-      lng: pos.coords.longitude.toFixed(6),
-      lat: pos.coords.latitude.toFixed(6),
-      t: new Date().toISOString(),
-    };
+  // 收点入轨：纠偏存档 → 连续重复去重 → 入 _scTrackRef 并实时同步 UI
+  const trackPush = (fix) => {
+    if (!_scTrackRef) return;
+    const pt = { lng: fix.lng, lat: fix.lat, t: new Date().toISOString() };
+    if (fix.acc !== null && fix.acc !== undefined) pt.acc = fix.acc;  // 精度存档，事后可甄别网络点
+    if (fix.adj) pt.adj = 1;                                          // 已纠偏标记（GCJ-02→WGS-84）
+    const last = _scTrackRef[_scTrackRef.length - 1];
+    if (last && last.lng === pt.lng && last.lat === pt.lat) return;
     _scTrackRef.push(pt);
     // 同步挂钩：scExtras 可能被重新拉取替换，确保 UI/轨迹图实时显示记录中的点
     if (state.scExtras) state.scExtras.track = _scTrackRef;
-  }, err => {
-    handleGeoError(err);
-    navigator.geolocation.clearWatch(_scWatchId);
+  };
+  // 异常中止：停采集与定时器，已记录的点仍保存（避免整段丢失）
+  const trackAbort = (err) => {
+    _bgStopWatcher();
+    if (_scWatchId !== null && _scWatchId !== 'bg') {
+      navigator.geolocation.clearWatch(_scWatchId);
+    }
     _scWatchId = null;
     state._scTracking = false;
     if (_scTrackTimer) { clearInterval(_scTrackTimer); _scTrackTimer = null; }
-    // 已记录的点仍保存，避免整段丢失
     if (_scTrackScId && _scTrackRef && _scTrackRef.length) _postTrack(_scTrackScId, _scTrackRef, false);
     _scTrackScId = null;
     _scTrackRef = null;
     _renderScPanel();
     _updateTrackMapState();
-  }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
+    if (err) handleGeoError(err);
+  };
+  // 原生壳优先用后台定位插件（前台服务，灭屏/后台持续记录）；浏览器回退 watchPosition
+  const bgGeo = bgGeoPlugin();
+  if (bgGeo) {
+    _scWatchId = 'bg';   // 哨兵：记录中（watcher id 异步返回）
+    _scBgGeo = bgGeo;
+    _scBgWatcherId = null;
+    bgGeo.addWatcher({
+      backgroundTitle: '验收轨迹记录中',
+      backgroundMessage: '正在后台记录调查轨迹，请保持定位开启',
+      requestPermissions: true,
+      stale: false,
+      distanceFilter: 0,
+    }, positionOrError => {
+      if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
+      if (positionOrError && positionOrError.error) { trackAbort(positionOrError.error); return; }
+      trackPush(_gpsFix({
+        longitude: positionOrError.longitude,
+        latitude: positionOrError.latitude,
+        accuracy: positionOrError.accuracy,
+      }));
+    }).then(id => {
+      // 竞态兜底：等待授权期间用户已点停止 → 立即注销，防前台服务/通知泄漏
+      if (_scWatchId === null || _scBgGeo !== bgGeo) {
+        bgGeo.removeWatcher({ id }).catch(() => {});
+      } else {
+        _scBgWatcherId = id;
+      }
+    }).catch(err => {
+      if (_scWatchId !== null) trackAbort(err);
+    });
+  } else {
+    _scWatchId = navigator.geolocation.watchPosition(pos => {
+      if (!_scTrackRef) return;
+      trackPush(_gpsFix(pos.coords));
+    }, err => {
+      trackAbort(err);
+    }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
+  }
   // 先立即取一个点：GPS 冷启动时 watch 回调可能数十秒不来，避免"记录中却 0 点"
   navigator.geolocation.getCurrentPosition(pos => {
     if (_scWatchId === null || !_scTrackRef) return;  // 已停止则丢弃
     if (!_scTrackRef.length) {
-      _scTrackRef.push({
-        lng: pos.coords.longitude.toFixed(6),
-        lat: pos.coords.latitude.toFixed(6),
-        t: new Date().toISOString(),
-      });
+      const fix = _gpsFix(pos.coords);
+      const pt = { lng: fix.lng, lat: fix.lat, t: new Date().toISOString() };
+      if (fix.acc !== null) pt.acc = fix.acc;
+      if (fix.adj) pt.adj = 1;
+      _scTrackRef.push(pt);
       if (state.scExtras) state.scExtras.track = _scTrackRef;
       _updateTrackMapState();
     }
@@ -2679,10 +2813,12 @@ async function scTrackToggle() {
 
 // 停止记录并保存（点「停止」或切换小班/退后台时调用）
 async function stopTrackRecording() {
-  if (_scWatchId !== null) {
+  // 插件模式：先移除 watcher 停前台服务（未 resolve 的 addWatcher 由 then 竞态分支自清）
+  _bgStopWatcher();
+  if (_scWatchId !== null && _scWatchId !== 'bg') {
     navigator.geolocation.clearWatch(_scWatchId);
-    _scWatchId = null;
   }
+  _scWatchId = null;
   if (_scTrackTimer) { clearInterval(_scTrackTimer); _scTrackTimer = null; }
   state._scTracking = false;
   if (_scTrackScId && _scTrackRef) {
@@ -3040,8 +3176,9 @@ async function scPhotoFileChange(input) {
       const pos = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
       });
-      lng = pos.coords.longitude.toFixed(6);
-      lat = pos.coords.latitude.toFixed(6);
+      const fix = _gpsFix(pos.coords);
+      lng = fix.lng;
+      lat = fix.lat;
     } catch (e) { /* 定位失败仍可保存照片 */ }
   }
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
@@ -3070,8 +3207,9 @@ async function gridScPhotoChange(input) {
       const pos = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
       });
-      lng = pos.coords.longitude.toFixed(6);
-      lat = pos.coords.latitude.toFixed(6);
+      const fix = _gpsFix(pos.coords);
+      lng = fix.lng;
+      lat = fix.lat;
     } catch (e) { /* 定位失败仍可保存照片 */ }
   }
   if (!state.scExtras) state.scExtras = { track: [], photos: [] };
@@ -3104,8 +3242,9 @@ async function samplePhotoFileChange(input) {
       const pos = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
       });
-      lng = pos.coords.longitude.toFixed(6);
-      lat = pos.coords.latitude.toFixed(6);
+      const fix = _gpsFix(pos.coords);
+      lng = fix.lng;
+      lat = fix.lat;
     } catch (e) { /* 定位失败仍可保存照片 */ }
   }
   const sampleNo = arr[idx].no || (idx + 1);
@@ -3595,12 +3734,13 @@ function smGetGPS(idx, auto) {
   navigator.geolocation.getCurrentPosition(pos => {
     const samples = smSamples();
     if (!samples || !samples[idx]) { if (!auto) toast('定位成功但样地已失效，请重试'); return; }
-    samples[idx].x = pos.coords.longitude.toFixed(6);
-    samples[idx].y = pos.coords.latitude.toFixed(6);
+    const fix = _gpsFix(pos.coords);
+    samples[idx].x = fix.lng;
+    samples[idx].y = fix.lat;
     // 只读坐标显示更新（无输入框）
     const el = qs(`[data-sm-coord="${idx}"]`);
     if (el) el.textContent = `📍 ${samples[idx].x}, ${samples[idx].y}`;
-    if (!auto) toast('定位成功');
+    if (!auto) toast(fix.adj ? '定位成功（网络定位已纠偏）' : '定位成功');
     smScheduleSave();
   }, err => {
     if (!auto) handleGeoError(err);
@@ -3663,8 +3803,9 @@ async function smPhotoFileChange(input) {
       const pos = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
       });
-      lng = pos.coords.longitude.toFixed(6);
-      lat = pos.coords.latitude.toFixed(6);
+      const fix = _gpsFix(pos.coords);
+      lng = fix.lng;
+      lat = fix.lat;
     } catch (e) { /* 定位失败仍可保存照片 */ }
   }
   const sampleNo = samples[idx].no || (idx + 1);

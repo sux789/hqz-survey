@@ -48,7 +48,7 @@
 - D1 导出入口仅管理后台 + 用户端 topbar「导出」（基本信息/样地，按当前项目+分类）
 - D2 导出记录按（林班, 调查小班号）数字序；exporter 显式 sort，不依赖 SQL ORDER BY
 - D3 合格率导出写数值（比率 0-1 如 0.9524），非百分比字符串；率类单元格（含模板行5后新增导出行）统一 0.00% 百分比格式，Excel 显示 95.24%；模板分派公式阈值按比率比较（AP>=0.9 合格、<=0.4 失败）
-- D4 轨迹导出 GPX 1.1，按小班打包 ZIP；Excel 轨迹列写对应 GPX 文件名
+- D4 轨迹导出仅 SHP（2026-08-24，反转 R12）：单 shapefile 每小班一条 LineString + 属性表（name/category/year/fc/sc/township/village/pts/start/end，字段名 ASCII ≤10 字符 DBF 规范，WGS84 + UTF-8 含 .cpg），ArcGIS 10 双击直开、GIS 中可 Append 合并；zip 打包（{分类}-{年度}-轨迹.zip / {项目名}_轨迹.zip）；连续重复点位自动去重（app.js 记录侧同步跳过连续同坐标点）；Excel 轨迹列（表1 AX/表2 BO/表3 BB）写 SHP name 属性（调查小班号，_track_shp_name 同源），不足 2 有效点的轨迹不入 SHP 亦不写列；zip 类导出必须在 with 块外 buf.seek(0)——块内会被 ZipFile.close() 推回 EOF → send_file 读出 0 字节（2026-08-24 生产 200+Content-Length 正确但空 body 事故，回归测试 test_buf_position_at_start）
 - D5 基本信息导出：一项目一文件（tpl-base 3分类sheet）；分类参数指定时其余 sheet 移除
 - D6 样地导出：tpl-samples 块结构（39行/块：R1标题含调查小班号 / R2年度县乡 / R3列头 / R4-26数据槽 / R27-39汇总区），每分类一个 sheet、每小班一块；单小班模式仅导该小班所属分类一个 sheet、一个小班块；样地行备注（sample.remark，卡片成活株数后文本框）导出写 I 列（模板 I3=备注，2026-08-21 用户手加表头）
 - D7 sheet 名格式「分类-调查小班号」，经 _sheet_safe 清禁止字符并截断 31 字符
@@ -64,7 +64,7 @@
 - D15 样地汇总区（R27-39，2026-08-21 起块高 39）：B27 总样地个数优先手写值 data_json.sm_total_count（>0 生效，与前端同口径），无有效手写值回退实际样地数；B28-30 SUM / B31 成活率 =IF(B29=0,"",B30/B29) / B34 调查总株数 =IF(OR(B27=0,B29=0),"",ROUND(B29/B27/150*B32*B33,0)) 为模板公式（除0守卫，块复制时行号偏移；B34 引用 B27，手写个数参与计算）；B32 单个网格面积 / B33 种植网格数量 / B35 撑杆 / B36 覆膜 / B37 验收人 / B38 验收日期 / B39 备注 从 data_json.sm_* 键写入（sm_grid_area/sm_grid_count/sm_pole/sm_film/sm_inspector/sm_inspect_date/sm_remark）
 - D16 样地页汇总区 13 项与模板 R27-39 一一对应：5 项自动计算（面积/总株数/成活株数/成活率/调查总株数，除0显示'--'）转纯文本放统计行（sm-stats-line，信息条下方，含"共 N 个样地"共 6 项文本）+ 8 项手写输入（sm_* 键落库，总样地个数 sm_total_count 默认自动填充实际样地数——仅空值或等于旧自动值时跟随增删同步，手改后以用户值为准；调查总株数公式中个数用手写值，与 B27/B34 同口径）；验收人默认当前用户、验收日期默认当天（仅填空值不覆盖，同打卡口径）；每张样地卡片尾部显示死亡株数（种植−成活，只读提示，导出由模板 E 列公式算）；样地页布局（2026-08-21 二次调整）：信息条→统计行（文本，不可输入）→滚动区 samples-scroll（样地列表 + 汇总表单在列表最下面随列表滚动，可输入控件不占列表上方空间防卡片被遮挡）→「+添加样地」按钮底部；统计值由 updateSmSummaryComputed 刷 data-sm-sum-val（不重渲染表单防焦点丢失）
 - D17 网格工具栏小班 select 前有调查小班号搜索框（#gridScSearch，仅正整数触发）：在当前筛选结果内按 r.subcompartment 精确匹配，命中则设 select 值并派发 change（复用手动选中完整流程：停轨迹/载数据/刷工具栏/渲染网格）；无匹配 toast 提示不动选择
-- D18 管理后台「分类下载」（项目管理 tab 展开行，2026-08-21，当日二次改版）：每分类三个下载，按钮顺序 基本信息→样地打包→轨迹打包——基本信息不打包直接下载 xlsx（export_base(category=)，仅该分类 sheet）；样地为 zip 且每小班一个 xlsx（export_samples_zip：单小班模式逐班导出再打包，784 小班约 26s）；轨迹为 zip（export_tracks_zip(category=)）。下载文件名 {分类}-{年度}-基本信息.xlsx / {分类}-{年度}-样地.zip / {分类}-{年度}-轨迹.zip（年度=项目名「(2023 年度)」→当前年，admin._dl_year）；zip 内文件名统一 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx/.gpx（exporter._sc_file_base：林班>0 带「林班-」防同号冲突，年度=小班 GDB 计划年度→项目名→当前年，同名追加序号；GPX 在 zip 内位于 tracks/ 目录）。GPX 文件名与 Excel 轨迹列同源 _track_gpx_filename（表1 AX/表2 BO/表3 BB），改版后两处一致。分类清单 GET /api/projects/<pid>/categories（懒加载缓存）；不传 cat 时整项目导出不变（实测对比）
+- D18 管理后台「分类下载」（项目管理 tab 展开行，2026-08-21，当日二次改版）：每分类三个下载，按钮顺序 基本信息→样地打包→轨迹打包——基本信息不打包直接下载 xlsx（export_base(category=)，仅该分类 sheet）；样地为 zip 且每小班一个 xlsx（export_samples_zip：单小班模式逐班导出再打包，784 小班约 26s）；轨迹为 zip（export_tracks_zip(category=)，单 shapefile，见 D4）。下载文件名 {分类}-{年度}-基本信息.xlsx / {分类}-{年度}-样地.zip / {分类}-{年度}-轨迹.zip（年度=项目名「(2023 年度)」→当前年，admin._dl_year）；样地 zip 内文件名 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx（exporter._sc_file_base：林班>0 带「林班-」防同号冲突，年度=小班 GDB 计划年度→项目名→当前年，同名追加序号）；轨迹 zip 内为单 shapefile 组件（tracks/ 目录）。分类清单 GET /api/projects/<pid>/categories（懒加载缓存）；不传 cat 时整项目导出不变（实测对比）
 - D19 GDB 文件列表不提供删除入口（2026-08-21 起移除 UI 按钮，防误删）：删除 GDB 只能随项目删除（DELETE /api/projects/<pid> 兜底清理关联 GDB）
 
 ## E 样地
@@ -86,6 +86,8 @@
 - F4 照片保存走原生插件 savePhoto（MediaStore 写入 Pictures/{年度}年度/{分类}/{调查小班号}号调查小班/，2026-08-21 起多级子目录；旧目录 Pictures/验收照片/ 已弃用），不用 WebView <a download>；年度取小班计划年度（GDB，"2023.0" 去 .0）→ 项目名「(2023 年度)」正则 → 当前年；每段目录名经 _dirSeg/sanitizeSubdir 清理非法字符并防路径穿越；提示显示原生返回真实路径（跨小班时按 subdir 匹配防串显），且提示框须清理旧提示
 - F5 照片水印：EXIF GPS 优先、回退当前定位；左下黑字白边三行（日期/坐标/备注）；重编码 JPEG 0.92，扩展名 .jpg；水印含样地号
 - F6 App 导出落盘走原生 saveFile（MediaStore Downloads/验收导出/）；浏览器/旧 APK 回退 <a download>
+- F7 坐标基准统一 WGS-84（2026-08-25）：国内网络定位（基站/WiFi，无 GMS 华为/鸿蒙设备林下 GPS 失效时回退）返回 GCJ-02，GPS 返回 WGS-84；所有采集点（轨迹/打卡/样地/表单 GPS/照片水印回退）统一走 app.js `_gpsFix`——accuracy≥50m 判为网络源，gcj2wgs 一次反算纠偏（误差 1~2m）入库并打 `adj:1` 标记、`acc` 精度存档，不丢弃任何点；轨迹图高德瓦片（GCJ-02）仅在显示层 wgs2gcj 转换，库内/SHP/Excel 导出一律 WGS-84；主地图 ArcGIS 影像瓦片本身 WGS-84 无需转换。旧轨迹数据不迁移（测试数据放弃）
+- F8 后台持续轨迹（2026-08-25）：轨迹记录优先走 @capacitor-community/background-geolocation 插件（原生壳内 `Capacitor.Plugins.BackgroundGeolocation`，addWatcher 带 backgroundTitle 自动起前台服务——灭屏/退后台进程不冻结，持续出点且 15 秒自动保存照常；插件由 manifest merger 自动带入 FOREGROUND_SERVICE(_LOCATION)/POST_NOTIFICATIONS 权限与 service 声明，无需手改 AndroidManifest）；浏览器/旧 APK 自动回退 watchPosition（退后台断档）；`_scWatchId='bg'` 为插件模式哨兵，停止走 `_bgStopWatcher`（removeWatcher 停前台服务），addWatcher 授权等待期停止由 then 竞态分支兜底注销防通知泄漏；前台服务由前台启动 + while-in-use 定位权限即可后台收点（Android 10+ 规则），无需 ACCESS_BACKGROUND_LOCATION 运行时授权；华为设备需手动设启动管理允许后台运行（厂商行为）
 
 ## G Android / 打包
 
@@ -121,3 +123,4 @@
 - R9 模板手改提醒（2026-08-21）：用户手动编辑 tpl-samples.xlsx 加 I3 备注 表头时曾顺带删掉 B31/B34 除0守卫公式（#DIV/0! 风险），已恢复；手改模板后跑 `python -m pytest tests/ -q`（TestTemplateFormulas + 汇总公式断言会拦）
 - R10 已反转（2026-08-21）：率类字段（合格率 computed + percent 输入列）存 ×100 值（如 98.44/95）→ 统一存比率 0-1（0.9844）；旧口径与 Excel 0.00% 百分比格式语义相反（导出显示 9844%、分派公式 0.9/0.4 阈值恒真错列）→ 见 C8/D3；另废弃 C8 旧成活率公式（round(平均成活株数)×666.67÷(样地面积×每亩设计株树)×100，代码已无引用），现口径 B31=Σ成活÷Σ种植 比率
 - R11 已反转（2026-08-24）：成活率等级三列（O/P/Q 类）原为 percent 手输列（存比率、录入值导出覆盖公式），面积分派列（S/AF/AH/AL 类）原为 number 手输 → 均改为 computed + store:false 派生列（前端实时算不落库，导出一律模板公式现算，见 D20）；反转原因：模板本身带分派公式，手输/落库会产生双真相（录入值与公式结果不一致时无仲裁），且面积分派=IF(合格率≥0.9,上报面积) 口径由公式单一承担；生产库经查无这些 key 的历史录入值，无迁移需求
+- R12 已反转（2026-08-24）：轨迹导出由三格式（GPX 1.1 每小班一文件 / KML 单文件 / SHP 单 shapefile，fmt 参数切换）收窄为仅 SHP 单 shapefile——用户决策「直接保存为 shp，可以追加，其他格式不提供」（SHP 在 GIS 中可 Append 合并）；Excel 轨迹列由「GPX 文件名」改为「SHP name 属性（调查小班号）」；旧 D4（GPX 1.1 按小班打包 ZIP + 轨迹列写 GPX 文件名）作废；GPX/KML 代码路径（_track_gpx/_track_kml/_track_desc/_track_gpx_filename）与 admin 三按钮、fmt 参数全部删除。同日修复生产空下载事故：export_tracks_zip 的 buf.seek(0) 误写在 ZipFile with 块内，close() 把指针推回 EOF，send_file 读出 0 字节（200 + Content-Length 正确）——测试用 ZipFile 打开复现不了，新增 test_buf_position_at_start 断言 buf.tell()==0
