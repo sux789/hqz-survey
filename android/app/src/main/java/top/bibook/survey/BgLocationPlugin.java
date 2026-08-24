@@ -27,10 +27,10 @@ import org.json.JSONObject;
  * @capacitor-community/background-geolocation 依赖 gms FusedLocationProviderClient，
  * 在该类设备上静默无回调（前台服务在跑、通知在，但定位点一个不来）。
  *
- * 本插件同时注册 GPS_PROVIDER 与 NETWORK_PROVIDER：
- * - GPS 源返回 WGS-84 坐标（provider="gps"）
- * - 网络源（HMS/基站/WiFi）返回 GCJ-02 坐标（provider="network"），随点携带 provider，
- *   JS 侧 _gpsFix 按 provider 精准纠偏（优于 accuracy 启发式）
+ * 本插件仅注册 GPS_PROVIDER（纯 GPS 策略，2026-08-25 用户决策去掉网络兜底）：
+ * - GPS 源返回 WGS-84 坐标（provider="gps"），无需纠偏
+ * - 网络源（HMS/基站/WiFi，GCJ-02 且纠偏后绝对精度仍 50~1000m）不采集——
+ *   宁可 GPS 无 fix 期间轨迹空白，不记偏点
  * 前台服务（foregroundServiceType=location）保住进程优先级，灭屏/后台持续采集。
  */
 @CapacitorPlugin(
@@ -46,7 +46,6 @@ public class BgLocationPlugin extends Plugin {
     private LocationManager locationManager;
     private LocationListener listener;
     private PluginCall watcherCall;
-    private long lastGpsTime = 0L;  // 最近一次 GPS 点时间：GPS 新鲜时网络点不转发（精度策略）
     // 授权弹窗期间用户点了停止：置 true，授权回调到达后不再启动采集（防通知/服务泄漏）
     private boolean wantsStop = false;
 
@@ -79,7 +78,6 @@ public class BgLocationPlugin extends Plugin {
     private void begin(PluginCall call) {
         call.setKeepAlive(true);
         watcherCall = call;
-        lastGpsTime = System.currentTimeMillis();  // 启动宽限：前 30s 不放网络点，等 GPS 首个 fix
         locationManager = (LocationManager) getContext().getSystemService(Context.LOCATION_SERVICE);
         if (locationManager == null) {
             call.reject("设备无定位服务", "NO_PROVIDER");
@@ -90,20 +88,7 @@ public class BgLocationPlugin extends Plugin {
             @Override
             public void onLocationChanged(Location location) {
                 if (watcherCall == null) return;
-                // 精度策略（GPS 优先）：
-                // 1) GPS 点照发并刷新 lastGpsTime；
-                // 2) 网络点仅当 GPS 超过 30 秒无点时才转发——该阈值同时覆盖启动期
-                //    （lastGpsTime 初始=启动时刻）：前 30 秒只等 GPS 首个 fix
-                //    （冷启动 TTFF 30s~几分钟，网络点秒回但误差几百米起，
-                //    若放行必成偏移首点）；GPS 中途失效同样 30 秒后兜底。
-                //    基站粗定位(>500m)直接丢弃。
-                boolean fromGps = LocationManager.GPS_PROVIDER.equals(location.getProvider());
-                if (fromGps) {
-                    lastGpsTime = System.currentTimeMillis();
-                } else {
-                    if (System.currentTimeMillis() - lastGpsTime < 30_000L) return;
-                    if (location.hasAccuracy() && location.getAccuracy() > 500f) return;
-                }
+                // 仅 GPS 源注册，此回调必为 GPS 点（WGS-84，无需纠偏）
                 JSObject o = new JSObject();
                 o.put("longitude", location.getLongitude());
                 o.put("latitude", location.getLatitude());
@@ -116,29 +101,18 @@ public class BgLocationPlugin extends Plugin {
             @Override public void onProviderEnabled(String provider) {}
             @Override public void onProviderDisabled(String provider) {}
         };
-        boolean any = false;
         try {
-            // minDistance=2m：抑制静止/慢行时的 GPS 噪声抖点（每秒一个 5~30m 随机
-            // 偏移点会让静止轨迹成毛团）；行走速度下每 1~2 秒仍有一个真实位移点
+            // 纯 GPS 采集（无网络兜底）：GPS 无 fix 期间（冷启动 30s~几分钟/深林遮挡）
+            // 不出点，宁可轨迹空白也不记偏点；minDistance=2m 抑制静止抖动毛团，
+            // 行走速度下每 1~2 秒仍有一个真实位移点
             locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER, 1000, 2f, listener, Looper.getMainLooper());
-            any = true;
         } catch (SecurityException e) {
             call.reject("定位权限未授予", "NOT_AUTHORIZED");
             cleanup();
             return;
-        } catch (IllegalArgumentException ignore) {
-            // 个别设备无 GPS provider：网络源仍可用
-        }
-        try {
-            locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER, 1000, 0f, listener, Looper.getMainLooper());
-            any = true;
-        } catch (Exception ignore) {
-            // NETWORK provider 由 HMS 定位实现；缺失则仅 GPS
-        }
-        if (!any) {
-            call.reject("设备无可用定位源", "NO_PROVIDER");
+        } catch (IllegalArgumentException e) {
+            call.reject("设备无 GPS 定位源", "NO_PROVIDER");
             cleanup();
             return;
         }
