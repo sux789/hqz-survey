@@ -106,6 +106,7 @@
 - H6 模板统一在项目根 tpl/（tpl-base.xlsx / tpl-samples.xlsx），deploy.sh 同步；官方原版归档 tpl/official/ 仅供对照
 - H7 gdb.py 图层分类前缀：人工造林/封山育林/退化林修复（水利水保/草原已彻底删除）
 - H8 project_name_exists_global 以 projects 表为真相源查重；delete_project 按项目名兜底清理孤儿小班行
+- H9 认证 session cookie 必须全站唯一一条（Path=/）：survey/survey-admin 的 create_app 显式 SESSION_COOKIE_PATH='/' + SESSION_REFRESH_EACH_REQUEST=False（Flask 默认会用 APPLICATION_ROOT 即 /survey、/survey-admin 写出第二条同名 cookie，登出不清理且"最长路径优先"发送遮蔽新登录 → 换账号后 api/me 仍返回前一个用户，2026-08-24 修复 7082570）；两端 after_request 持续下发前缀 cookie 删除指令清历史遗留；forest-data 登录/登出同时 delete_cookie 前缀路径
 
 ## R 反转记录（已废弃约束，保留溯源）
 
