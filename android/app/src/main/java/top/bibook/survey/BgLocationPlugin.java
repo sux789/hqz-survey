@@ -46,6 +46,7 @@ public class BgLocationPlugin extends Plugin {
     private LocationManager locationManager;
     private LocationListener listener;
     private PluginCall watcherCall;
+    private long lastGpsTime = 0L;  // 最近一次 GPS 点时间：GPS 新鲜时网络点不转发（精度策略）
     // 授权弹窗期间用户点了停止：置 true，授权回调到达后不再启动采集（防通知/服务泄漏）
     private boolean wantsStop = false;
 
@@ -88,6 +89,17 @@ public class BgLocationPlugin extends Plugin {
             @Override
             public void onLocationChanged(Location location) {
                 if (watcherCall == null) return;
+                // 精度策略（GPS 优先）：
+                // 1) GPS 点照发并刷新 lastGpsTime；
+                // 2) 网络点仅当 GPS 超过 10 秒无点时才转发（低精度网络点与 GPS 点
+                //    交叉混采是轨迹锯齿的主因）；基站粗定位(>500m)直接丢弃。
+                boolean fromGps = LocationManager.GPS_PROVIDER.equals(location.getProvider());
+                if (fromGps) {
+                    lastGpsTime = System.currentTimeMillis();
+                } else {
+                    if (System.currentTimeMillis() - lastGpsTime < 10_000L) return;
+                    if (location.hasAccuracy() && location.getAccuracy() > 500f) return;
+                }
                 JSObject o = new JSObject();
                 o.put("longitude", location.getLongitude());
                 o.put("latitude", location.getLatitude());
@@ -102,8 +114,10 @@ public class BgLocationPlugin extends Plugin {
         };
         boolean any = false;
         try {
+            // minDistance=2m：抑制静止/慢行时的 GPS 噪声抖点（每秒一个 5~30m 随机
+            // 偏移点会让静止轨迹成毛团）；行走速度下每 1~2 秒仍有一个真实位移点
             locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER, 1000, 0f, listener, Looper.getMainLooper());
+                    LocationManager.GPS_PROVIDER, 1000, 2f, listener, Looper.getMainLooper());
             any = true;
         } catch (SecurityException e) {
             call.reject("定位权限未授予", "NOT_AUTHORIZED");
