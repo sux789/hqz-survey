@@ -223,11 +223,12 @@ function computeGroups(fields) {
 // ── 初始化 ──
 async function init() {
   renderShell();
-  // Android 物理返回键：样地页返回小班页（默认 goBack 无 SPA 历史会直接退出 App）
+  // Android 物理返回键：样地页返回小班页，网格调查页返回项目列表（默认 goBack 无 SPA 历史会直接退出 App）
   try {
     if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
       window.Capacitor.Plugins.App.addListener('backbutton', async () => {
         if (state.view === 'samples') { await smLeaveToGrid(); return; }
+        if (state.view === 'survey_grid') { goToProjects(); return; }
         // 其余视图走浏览器历史（无历史时退出 App）
         if (window.history.length > 1) window.history.back();
         else if (navigator.app && navigator.app.exitApp) navigator.app.exitApp();
@@ -382,7 +383,7 @@ function renderTopBar() {
     : (state.view === 'samples'
       ? '<button class="btn-back" data-action="go-grid" title="返回小班">‹</button>'
       : ((state.view === 'survey' || state.view === 'survey_grid')
-        ? '<button class="btn-back" data-action="go-sc-list" title="返回小班列表">‹</button>'
+        ? '<button class="btn-back" data-action="go-projects" title="返回项目列表">‹</button>'
         : ''));
   let viewTitle = '';
   if (state.view === 'projects') {
