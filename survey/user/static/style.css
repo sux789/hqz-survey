@@ -1695,6 +1695,34 @@ input, select, textarea, button {
   font-size: 13px;
   max-width: 50vw;
 }
+/* 操作按钮基础样式（网格工具栏 照片/轨迹/打卡/样地、样地页 保存/导出、签字/轨迹弹窗）：
+   此前无基础规则 → 暗黑模式下 WebView 默认白底 + color:inherit 继承浅色文字，
+   白字白底不可见。统一用主题变量，明暗模式自适应。 */
+.btn-grid-action {
+  height: 34px;
+  min-width: 64px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.btn-grid-action:active { background: var(--border); }
+.btn-grid-action.btn-primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.btn-grid-action.btn-primary:active { background: var(--green-d); }
+.btn-grid-action.danger {
+  background: var(--danger-l);
+  border-color: var(--danger-l);
+  color: #fff;
+}
 .grid-hint {
   font-size: 12px;
   color: var(--text-2);
