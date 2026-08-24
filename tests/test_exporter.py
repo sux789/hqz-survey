@@ -200,8 +200,9 @@ class TestExportBase:
         output, _ = exporter.export_base(sample_data["pid"])
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        # sc1 在行6：O 成活率 0.85（比率，录入值覆盖公式）+ 百分比格式
-        assert ws.cell(row=6, column=15).value == 0.85
+        # sc1 在行6：O 成活率分派列 store:false —— 录入值不导出，模板公式代入
+        # （AP6=0.875 <0.9 → Excel 打开显示空白）
+        assert ws.cell(row=6, column=15).value == '=IF(AP6>=0.9,AP6,"")'
         assert ws.cell(row=6, column=15).number_format == '0.00%'
         # AN 查数株数 = 调查总株数 13333（B34 口径），AO 合格株树 11666，AP 合格率 0.875
         assert ws.cell(row=6, column=40).value == 13333
@@ -211,6 +212,36 @@ class TestExportBase:
         assert ws.cell(row=6, column=42).number_format == '0.00%'
         # AT 备注
         assert ws.cell(row=6, column=46).value == "测试备注"
+
+    def test_derived_dispatch_columns_formula_only(self, sample_data):
+        """store:false 分派列（成活率等级 O/P/Q + 面积 S/AF/AH/AL）一律模板公式：
+        即使 data_json 残留旧值也不导出，由 Excel 现算（合格率≥0.9 → 上报面积）。
+        """
+        pid = sample_data["pid"]
+        sc1 = sample_data["sc1"]
+        # 残留值模拟（store:false 字段正常情况下不会落库）
+        rec = storage.get_survey_rows(pid, "table1")
+        base = next((r["data"] or {} for r in rec if r["subcompartment_id"] == sc1), {})
+        base.update({
+            "survival_replant": "0.875",   # P 列残留
+            "verified_pass": "999.9",      # S 列残留
+            "construction_area": "888.8",  # AF 列残留
+        })
+        storage.upsert_survey_row(pid, "table1", sc1, base, "张三",
+                                  base_version=(next(r["version"] for r in rec
+                                                     if r["subcompartment_id"] == sc1)))
+        output, _ = exporter.export_base(pid)
+        wb = openpyxl.load_workbook(output)
+        ws = wb["2023年度人工造林"]
+        # sc1 行6：残留值全部忽略，公式代入（AP6=0.875 在 0.4~0.9 → 待补植列显示率）
+        assert ws.cell(row=6, column=15).value == '=IF(AP6>=0.9,AP6,"")'    # O 合格
+        assert ws.cell(row=6, column=16).value == '=IF(AND(AP6<0.9,AP6>0.4),AP6,"")'  # P 待补植
+        assert ws.cell(row=6, column=17).value == '=IF(AP6<=0.4,AP6,"")'    # Q 失败
+        # 面积分派：合格率≥0.9 才回填上报面积 N 列 —— 同样公式承担
+        assert ws.cell(row=6, column=19).value == '=IF(AP6>=0.9,N6,"")'     # S 合格面积
+        assert ws.cell(row=6, column=32).value == '=IF(AP6>=0.9,N6,"")'     # AF 施工面积
+        assert ws.cell(row=6, column=34).value == '=IF(AP6>=0.9,N6,"")'     # AH 建档面积
+        assert ws.cell(row=6, column=38).value == '=IF(AP6>=0.9,N6,"")'     # AL 抚育面积
 
     def test_unsurveyed_row_leaves_input_blank(self, sample_data):
         """未录入小班（sc2 行5）：纯数据列留空，模板公式列代入公式。"""
@@ -227,14 +258,14 @@ class TestExportBase:
         pid = sample_data["pid"]
         sc2 = sample_data["sc2"]
         storage.upsert_survey_row(pid, "table1", sc2, {
-            "survival_pass": "0.9524",     # O 列
-            "construction_rate": "0.9844",  # AG 列（施工率）
+            "survival_pass": "0.9524",     # O 列（store:false 残留 → 导出忽略，公式承担）
+            "construction_rate": "0.9844",  # AG 列（施工率，手输 percent 落库）
         }, "张三")
         output, _ = exporter.export_base(pid)
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        # sc2 排序后行5
-        assert ws.cell(row=5, column=15).value == 0.9524   # O
+        # sc2 排序后行5：O 分派列公式代入（Excel 打开现算），残留值 0.9524 不导出
+        assert ws.cell(row=5, column=15).value == '=IF(AP5>=0.9,AP5,"")'
         assert ws.cell(row=5, column=15).number_format == '0.00%'
         assert ws.cell(row=5, column=33).value == 0.9844   # AG
         assert ws.cell(row=5, column=33).number_format == '0.00%'

@@ -166,3 +166,34 @@ class TestApiConflictResponse:
         assert cf["data"] == {"a": 99}
         assert cf["inspector"] == "乙"
         assert "updated_at" in cf
+
+
+class TestApiStoreFalseStrip:
+    """store:false 派生字段（成活率等级/面积分派）不落库：
+    PUT 端点剔除这些 key，普通 computed（如合格率统计）与手输字段保留。
+    """
+
+    def test_put_strips_derived_keys(self, project, monkeypatch):
+        monkeypatch.setenv("SURVEY_LOCAL_DEV", "1")
+        from survey.user.app import create_app
+
+        app = create_app(prefix=None)
+        app.config["TESTING"] = True
+        client = app.test_client()
+
+        pid = project["id"]
+        r = client.put(f"/api/projects/{pid}/survey/table1/rows", json={
+            "subcompartment_id": "sc-1",
+            "data": {
+                "remark": "保留",
+                "survival_pass": "0.95",     # store:false → 剔除
+                "survival_replant": "",       # store:false → 剔除
+                "verified_pass": "999",       # store:false → 剔除
+                "construction_area": "888",   # store:false → 剔除
+                "qualified_rate": 0.95,       # 普通 computed 统计 → 保留
+            },
+            "inspector": "甲", "base_version": 0,
+        })
+        assert r.status_code == 200
+        rows = storage.get_survey_rows(pid, "table1")
+        assert rows[0]["data"] == {"remark": "保留", "qualified_rate": 0.95}

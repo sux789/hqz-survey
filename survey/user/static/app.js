@@ -48,6 +48,7 @@ const state = {
   gridScRows: null,                // 按分类过滤后的小班集合（null=用 scAllRows）
   _gridRowFields: [],              // 当前两列表格每行的字段信息（用于行号→字段映射）
 };
+window.__hqzState = state;  // TODO(debug): 临时调试钩子，验证后删除
 
 // 分类→表映射
 const CATEGORY_TO_TABLE = {
@@ -1149,6 +1150,14 @@ function showRowConflictDialog(ctx) {
   });
 }
 
+// 当前小班的预填数据（GDB 黄色列）：网格页取行自带 prefilled，详情页回退 subcompartmentData
+function currentPrefilled() {
+  const sc = state.gridSubcompartment;
+  if (sc) return sc.prefilled || state.subcompartmentPrefilledMap[sc.id] || {};
+  if (state.subcompartmentData && state.subcompartmentData.prefilled) return state.subcompartmentData.prefilled;
+  return {};
+}
+
 // 公式计算：根据 formula 名和数据计算 computed 字段值
 // 样地统计（与导出端 _sample_stats / 样地页 smSummaryComputed 同口径）：
 //   查数株数 = 调查总株数（样地模板 B34 同口径）
@@ -1172,15 +1181,35 @@ function computeFieldValue(formula, data) {
   const gCount = Number(data && data.sm_grid_count) || 0;
   // 查数株数 = 调查总株数（B34 守卫：个数或Σ种植为 0 → 空；网格未填时结果为 0，同模板）
   const total = (n > 0 && planted > 0) ? Math.round(planted / n / 150 * gArea * gCount) : null;
+  // 合格率（比率 0-1；无样地 → 空）
+  const rate = planted ? (alive / planted) : null;
+  const rate4 = rate != null ? Math.round(rate * 10000) / 10000 : null;
   switch (formula) {
     case 's_planted_total':
       return total || '';
     case 's_qualified_rate':
-      if (!planted) return '';
-      return Math.round(alive / planted * 10000) / 10000;
+      return rate4 != null ? rate4 : '';
     case 's_qualified_count': {
       if (!total || !planted) return '';
       return Math.round(total * alive / planted) || '';
+    }
+    // ── 成活率等级三列（互斥分派，与模板 =IF(AP>=0.9,AP,"") 等公式同口径）──
+    case 's_survival_pass':      // 合格：合格率 ≥ 0.9 → 显示合格率，否则空白
+      return (rate != null && rate >= 0.9) ? rate4 : '';
+    case 's_survival_replant':   // 待补植：0.4 < 合格率 < 0.9 → 显示合格率，否则空白
+      return (rate != null && rate < 0.9 && rate > 0.4) ? rate4 : '';
+    case 's_survival_fail':      // 失败：合格率 ≤ 0.4 → 显示合格率，否则空白
+      return (rate != null && rate <= 0.4) ? rate4 : '';
+    // ── 面积分派列：合格率 ≥0.9 → 上报面积原样填入；<0.9 → 留空（模板 =IF(AP>=0.9,N,"")）──
+    // 上报面积是小班预填（GDB）字段，不在调查记录 data 里：优先 data 带入值，
+    // 否则从当前小班预填取；GDB 字符串数值（"11000.0"）转数字显示
+    case 's_qualified_area': {
+      if (rate == null || rate < 0.9) return '';
+      let area = data && data.reported_area;
+      if (area == null || area === '') area = currentPrefilled().reported_area;
+      if (area == null || area === '') return '';
+      const n = Number(area);
+      return isNaN(n) ? String(area) : n;
     }
     default: return '';
   }
@@ -1201,10 +1230,11 @@ function pctToStore(v) {
   if (isNaN(n)) return v;
   return Math.round(n * 100) / 10000;  // 95 → 0.95；95.24 → 0.9524（保留4位）
 }
-// computed 率类字段展示：0.9524 → "95.24%"（合格率）；计数类原样输出
+// computed 率类字段展示：0.9524 → "95.24%"（合格率/成活率等级三列）；计数/面积类原样输出
 function fmtComputedDisplay(formula, cv) {
   if (cv === '' || cv == null) return '';
-  if (formula === 's_qualified_rate') {
+  if (formula === 's_qualified_rate' || formula === 's_survival_pass'
+    || formula === 's_survival_replant' || formula === 's_survival_fail') {
     const n = Number(cv);
     return isNaN(n) ? String(cv) : (Math.round(n * 10000) / 100).toFixed(2) + '%';
   }

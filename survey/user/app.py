@@ -388,6 +388,14 @@ def api_upsert_survey_row(pid, table_id):
     data = body.get("data", {})
     if not sc_id:
         return jsonify({"error": "subcompartment_id 不能为空"}), 400
+    # store:false 的 computed 派生字段（成活率等级/面积分派）不落库：
+    # 前端随保存重算仅用于实时显示，导出由模板公式承担（防旧值残留覆盖公式）
+    table_def = S.get_table(table_id)
+    if table_def and isinstance(data, dict):
+        no_store = {f["key"] for f in table_def.get("input_columns", [])
+                    if f.get("type") == "computed" and f.get("store") is False}
+        if no_store:
+            data = {k: v for k, v in data.items() if k not in no_store}
     u = A.current_user(FOREST_DB, LOCAL_DEV, LOCAL_USER)
     inspector = body.get("inspector", "") or u["username"]
     bv = body.get("base_version")

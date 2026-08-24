@@ -20,7 +20,8 @@
   checkin       打卡（一键记录时间+GPS）
   track         轨迹（开始记录 / 上传 GPX）
   sample_array  样地子数组（一小班多条样地，存于 data_json.samples）
-  computed      公式自动计算（只读，formula 指定计算函数名，前端自动算）
+  computed      公式自动计算（只读，formula 指定计算函数名，前端自动算；
+                store:false 表示仅显示不落库——如成活率等级/面积分派列，导出由模板公式承担）
 
 数据模型（小班最小粒度，一对一）:
   三张验收表（人工造林/封山育林/退化林修复），每张表每个小班至多一条记录，
@@ -212,9 +213,28 @@ _CHECKIN_COORDS = [
 
 # ── 通用率类字段（施工率/建档率/管护率/抚育率） ──
 def _rate_pair(key_area, key_rate, label_area, label_rate, group="管护抚育"):
-    """面积 + 率 配对字段。key 保持英文（存储用），label 用中文（与 xlsx 模板表头一致）。"""
+    """面积 + 率 配对字段（手输）。key 保持英文（存储用），label 用中文（与 xlsx 模板表头一致）。"""
     return [
         {"key": key_area, "label": label_area, "type": "number", "group": group, "unit": "亩", "required": False, "col_span": "half"},
+        {"key": key_rate, "label": label_rate, "type": "percent", "group": group, "required": False, "col_span": "half"},
+    ]
+
+# ── 合格分派派生字段（computed + store:false：前端实时计算显示，不落库；导出由
+#    模板公式 =IF(合格率>=0.9,…) 承担，无录入值时公式保留、Excel 打开即计算）──
+# 成活率等级三列（互斥）：合格率=Σ成活÷Σ种植（比率）——
+#   ≥0.9 → 合格列显示合格率；0.4<x<0.9 → 待补植列；≤0.4 → 失败列；其余列空白
+# 面积分派列：合格率 ≥0.9 → 上报面积原样填入；<0.9 → 留空
+_DERIVED_SURVIVAL = [
+    {"key": "survival_pass", "label": "成活率-合格", "type": "computed", "formula": "s_survival_pass", "store": False, "group": "成活率", "col_span": "third"},
+    {"key": "survival_replant", "label": "成活率-待补植", "type": "computed", "formula": "s_survival_replant", "store": False, "group": "成活率", "col_span": "third"},
+    {"key": "survival_fail", "label": "成活率-失败", "type": "computed", "formula": "s_survival_fail", "store": False, "group": "成活率", "col_span": "third"},
+]
+_DERIVED_QUALIFIED_AREA = {"key": "verified_pass", "label": "核实-合格面积", "type": "computed", "formula": "s_qualified_area", "store": False, "group": "核实面积", "unit": "亩", "col_span": "fifth"}
+
+def _derived_area_pair(key_area, key_rate, label_area, label_rate, group="管护抚育"):
+    """派生面积（computed 不落库，随合格率/上报面积联动）+ 率（手输 percent）配对字段。"""
+    return [
+        {"key": key_area, "label": label_area, "type": "computed", "formula": "s_qualified_area", "store": False, "group": group, "unit": "亩", "col_span": "half"},
         {"key": key_rate, "label": label_rate, "type": "percent", "group": group, "required": False, "col_span": "half"},
     ]
 
@@ -247,13 +267,11 @@ TABLES = [
             {"key": "design_count", "label": "小班设计株树", "col": "AQ"},  # GDB 需苗量/小班设计株树
         ],
         "input_columns": [
-            # 成活率等级
-            {"key": "survival_pass", "label": "成活率-合格", "type": "percent", "group": "成活率", "col_span": "third"},
-            {"key": "survival_replant", "label": "成活率-待补植", "type": "percent", "group": "成活率", "col_span": "third"},
-            {"key": "survival_fail", "label": "成活率-失败", "type": "percent", "group": "成活率", "col_span": "third"},
+            # 成活率等级（派生：随合格率互斥分派，不落库）
+            *_DERIVED_SURVIVAL,
             # 核实面积
             {"key": "verified_total", "label": "核实面积-计", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
-            {"key": "verified_pass", "label": "核实-合格面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
+            _DERIVED_QUALIFIED_AREA,
             {"key": "verified_replant", "label": "核实-待补植面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "verified_fail", "label": "核实-失败面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "verified_loss", "label": "核实-损失面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
@@ -261,7 +279,7 @@ TABLES = [
             {"key": "area_short_reason", "label": "面积核实不足原因", "type": "text", "group": "原因", "col_span": "full"},
             {"key": "unqualified_reason", "label": "造林不合格原因", "type": "text", "group": "原因", "col_span": "half"},
             {"key": "loss_reason", "label": "损失原因", "type": "text", "group": "原因", "col_span": "half"},
-        ] + _MGMT_FIELDS + _rate_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _rate_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _rate_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
+        ] + _MGMT_FIELDS + _derived_area_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _derived_area_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _derived_area_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
             # ── 样地调查（弹窗录入，独立样地模板导出）──
             _SAMPLES_FIELD,
         ] + _SAMPLE_STATS + _CHECKIN_COORDS + [
@@ -307,11 +325,9 @@ TABLES = [
             {"key": "design_count", "label": "小班设计株树", "col": "BH"},
         ],
         "input_columns": [
-            {"key": "survival_pass", "label": "成活率-合格", "type": "percent", "group": "成活率", "col_span": "third"},
-            {"key": "survival_replant", "label": "成活率-待补植", "type": "percent", "group": "成活率", "col_span": "third"},
-            {"key": "survival_fail", "label": "成活率-失败", "type": "percent", "group": "成活率", "col_span": "third"},
+            *_DERIVED_SURVIVAL,
             {"key": "verified_total", "label": "核实面积-计", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
-            {"key": "verified_pass", "label": "核实-合格面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
+            _DERIVED_QUALIFIED_AREA,
             {"key": "verified_replant", "label": "核实-待补植面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "verified_fail", "label": "核实-失败面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "verified_loss", "label": "核实-损失面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
@@ -328,7 +344,7 @@ TABLES = [
             {"key": "broadleaf_seedling", "label": "阔叶树-幼苗(株/亩)", "type": "number", "group": "株数调查", "col_span": "third"},
             {"key": "broadleaf_sapling", "label": "阔叶树-幼树(株/亩)", "type": "number", "group": "株数调查", "col_span": "third"},
             {"key": "bamboo_count", "label": "乔木根株或毛竹(株/亩)", "type": "number", "group": "株数调查", "col_span": "full"},
-        ] + _MGMT_FIELDS + _rate_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _rate_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _rate_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
+        ] + _MGMT_FIELDS + _derived_area_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _derived_area_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _derived_area_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
             # ── 样地调查（弹窗录入，独立样地模板导出）──
             _SAMPLES_FIELD,
         ] + _SAMPLE_STATS + _CHECKIN_COORDS + [
@@ -367,18 +383,16 @@ TABLES = [
             {"key": "design_count", "label": "小班设计株树", "col": "AU"},
         ],
         "input_columns": [
-            {"key": "survival_pass", "label": "成活率-合格", "type": "percent", "group": "成活率", "col_span": "third"},
-            {"key": "survival_replant", "label": "成活率-待补植", "type": "percent", "group": "成活率", "col_span": "third"},
-            {"key": "survival_fail", "label": "成活率-失败", "type": "percent", "group": "成活率", "col_span": "third"},
+            *_DERIVED_SURVIVAL,
             {"key": "verified_total", "label": "核实面积-计", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
-            {"key": "verified_pass", "label": "核实-合格面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
+            _DERIVED_QUALIFIED_AREA,
             {"key": "verified_replant", "label": "核实-待补植面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "verified_fail", "label": "核实-失败面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "verified_loss", "label": "核实-损失面积", "type": "number", "group": "核实面积", "unit": "亩", "col_span": "fifth"},
             {"key": "area_short_reason", "label": "面积核实不足原因", "type": "text", "group": "原因", "col_span": "full"},
             {"key": "unqualified_reason", "label": "造林不合格原因", "type": "text", "group": "原因", "col_span": "half"},
             {"key": "loss_reason", "label": "损失原因", "type": "text", "group": "原因", "col_span": "half"},
-        ] + _MGMT_FIELDS + _rate_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _rate_pair("archive_area", "archive_rate", "建档面积", "建档率") + _rate_pair("protect_area", "protect_rate", "管护面积", "管护率") + _rate_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
+        ] + _MGMT_FIELDS + _derived_area_pair("construction_area", "construction_rate", "符合设计的施工面积", "按作业设计施工率") + _derived_area_pair("archive_area", "archive_rate", "建档面积", "建档率") + _derived_area_pair("protect_area", "protect_rate", "管护面积", "管护率") + _derived_area_pair("tend_area", "tend_rate", "抚育面积", "抚育率") + [
             # ── 样地调查（弹窗录入，独立样地模板导出）──
             _SAMPLES_FIELD,
         ] + _SAMPLE_STATS + _CHECKIN_COORDS + [

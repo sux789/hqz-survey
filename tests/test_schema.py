@@ -109,26 +109,26 @@ class TestSchema:
         assert "inspect_time" in errors
 
     def test_validate_row_invalid_number(self):
-        """测试数值校验。"""
+        """测试数值校验（成活率等级/面积分派为 store:false computed，不参与校验）。"""
         data = {
             "inspector": "张三",
             "inspect_time": "2026-08-10",
-            "survival_pass": "abc",  # 非数值
+            "verified_total": "abc",  # 非数值（核实面积-计，number 手输）
         }
         ok, errors = S.validate_row("table1", data)
         assert not ok
-        assert "survival_pass" in errors
+        assert "verified_total" in errors
 
     def test_validate_row_percent_out_of_range(self):
         """测试百分比超范围（存比率 0-1，>1 即非法）。"""
         data = {
             "inspector": "张三",
             "inspect_time": "2026-08-10",
-            "survival_pass": "1.5",  # 比率超过 1
+            "construction_rate": "1.5",  # 比率超过 1（施工率，percent 手输）
         }
         ok, errors = S.validate_row("table1", data)
         assert not ok
-        assert "survival_pass" in errors
+        assert "construction_rate" in errors
 
     def test_field_groups(self):
         """测试字段分组。"""

@@ -603,6 +603,10 @@ def export_base(pid, output_path=None, category=None):
                          for _, (key, src) in _TPL_COL_MAPS[table_id].items())
 
         rate_cols = _RATE_COLS.get(table_id, set())
+        # store:false 派生列（成活率等级/面积分派）：不写录入值，
+        # 一律由模板公式 =IF(AP>=0.9,…) 现算（历史残留值不覆盖公式）
+        no_store_keys = {f["key"] for f in table_def.get("input_columns", [])
+                         if f.get("type") == "computed" and f.get("store") is False}
         for i, sc_row in enumerate(sc_rows):
             row_num = _BASE_DATA_START + i
             prefilled = S.map_subcompartment_to_prefilled(sc_row.get("data", {}))
@@ -610,6 +614,8 @@ def export_base(pid, output_path=None, category=None):
             stats_v = _sample_stats(input_data)
             extras = storage.get_extras(sc_row["id"]) if need_extra else None
             for col_letter, (key, source) in _TPL_COL_MAPS[table_id].items():
+                if key in no_store_keys:
+                    continue
                 val = _resolve_cell(key, source, prefilled, input_data,
                                     extras, stats_v, sc_row, field_types)
                 if source == 'sign':
