@@ -10,7 +10,7 @@
 字段类型 (type):
   enum          单选下拉（options 必填）
   number        数值输入
-  percent       百分比 0-100
+  percent       百分比（存比率 0-1 不 ×100，如 0.95；前端输入 95 显示 95%，Excel 0.00% 格式）
   date          日期选择
   text          单行文本
   textarea      多行文本
@@ -451,8 +451,9 @@ def _validate_single_field(f, val, errors):
                 errors[key] = f"{f['label']}不能小于{f['min']}"
             if f.get("max") is not None and num > f["max"]:
                 errors[key] = f"{f['label']}不能大于{f['max']}"
-            if ftype == "percent" and (num < 0 or num > 100):
-                errors[key] = f"{f['label']}应在0-100之间"
+            if ftype == "percent" and (num < 0 or num > 1):
+                # 率类存比率 0-1（不 ×100，与 Excel 0.00% 百分比格式同语义）
+                errors[key] = f"{f['label']}应在0-1之间（比率，如0.95）"
         except (ValueError, TypeError):
             errors[key] = f"{f['label']}应为数值"
     elif ftype == "enum":
@@ -498,8 +499,9 @@ def validate_row(table_id, row_data):
                                 errors[f"samples[{i}].{sf['key']}"] = f"样方{i+1}：{sf['label']}不能小于{sf['min']}"
                             if sf.get("max") is not None and num > sf["max"]:
                                 errors[f"samples[{i}].{sf['key']}"] = f"样方{i+1}：{sf['label']}不能大于{sf['max']}"
-                            if sftype == "percent" and (num < 0 or num > 100):
-                                errors[f"samples[{i}].{sf['key']}"] = f"样方{i+1}：{sf['label']}应在0-100之间"
+                            if sftype == "percent" and (num < 0 or num > 1):
+                                # 率类存比率 0-1（不 ×100）
+                                errors[f"samples[{i}].{sf['key']}"] = f"样方{i+1}：{sf['label']}应在0-1之间（比率）"
                         except (ValueError, TypeError):
                             errors[f"samples[{i}].{sf['key']}"] = f"样方{i+1}：{sf['label']}应为数值"
         else:

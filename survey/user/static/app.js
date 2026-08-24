@@ -1153,7 +1153,9 @@ function showRowConflictDialog(ctx) {
 //   查数株数 = 调查总株数（样地模板 B34 同口径）
 //            = round(Σ种植 ÷ 个数 ÷ 150 × 网格面积 × 网格数量)，
 //            个数 = 手写 sm_total_count（>0 生效）回退实际样地数
-//   合格率 = Σ成活÷Σ种植×100（保留2位）；合格株树 = round(查数株数×合格率÷100)
+//   合格率 = Σ成活÷Σ种植（比率 0-1 如 0.9524，保留4位，不 ×100——
+//            与 Excel 模板 0.00% 百分比格式/分派公式 0.9/0.4 阈值同语义）；
+//   合格株树 = round(查数株数×合格率)
 function computeFieldValue(formula, data) {
   const samples = data && Array.isArray(data.samples) ? data.samples : [];
   let planted = 0, alive = 0, realN = 0;
@@ -1174,14 +1176,38 @@ function computeFieldValue(formula, data) {
       return total || '';
     case 's_qualified_rate':
       if (!planted) return '';
-      return (Math.round(alive / planted * 10000) / 100).toFixed(2);
+      return Math.round(alive / planted * 10000) / 10000;
     case 's_qualified_count': {
       if (!total || !planted) return '';
-      const rate = Math.round(alive / planted * 10000) / 100;
-      return Math.round(total * rate / 100) || '';
+      return Math.round(total * alive / planted) || '';
     }
     default: return '';
   }
+}
+
+// ── 率类字段（percent）显示/存储换算 ──
+// 存储统一为比率 0-1（不 ×100，与 Excel 模板百分比格式/分派公式阈值同语义）；
+// 输入框 UX 不变：用户仍输入 95（见 95%），保存时 ÷100，回显时 ×100。
+function pctToDisplay(v) {
+  if (v === '' || v == null) return '';
+  const n = Number(v);
+  if (isNaN(n)) return String(v);
+  return String(Math.round(n * 10000) / 100);
+}
+function pctToStore(v) {
+  if (v === '' || v == null) return '';
+  const n = Number(v);
+  if (isNaN(n)) return v;
+  return Math.round(n * 100) / 10000;  // 95 → 0.95；95.24 → 0.9524（保留4位）
+}
+// computed 率类字段展示：0.9524 → "95.24%"（合格率）；计数类原样输出
+function fmtComputedDisplay(formula, cv) {
+  if (cv === '' || cv == null) return '';
+  if (formula === 's_qualified_rate') {
+    const n = Number(cv);
+    return isNaN(n) ? String(cv) : (Math.round(n * 10000) / 100).toFixed(2) + '%';
+  }
+  return String(cv);
 }
 
 // 刷新详情页全部 computed 字段显示（样地数据变化后调用）
@@ -1191,7 +1217,7 @@ function refreshComputedDisplays() {
     const cv = computeFieldValue(f.formula, state.formData);
     state.formData[f.key] = cv;
     const el = qs(`[data-computed-val="${f.key}"]`);
-    if (el) el.textContent = cv === '' ? '自动计算' : cv;
+    if (el) el.textContent = cv === '' ? '自动计算' : fmtComputedDisplay(f.formula, cv);
   });
 }
 
@@ -1234,13 +1260,15 @@ async function renderSurveyForm() {
     if (f.type === 'computed') {
       rowFields.push({ kind: 'computed', key: f.key, label: f.label, type: f.type, formula: f.formula });
       const cv = computeFieldValue(f.formula, sv);
-      data.push([f.label, String(cv)]);
+      data.push([f.label, fmtComputedDisplay(f.formula, cv)]);
       return;
     }
     // readOnly 输入字段（从密点文件读取等）
     rowFields.push({ kind: 'input', key: f.key, label: f.label, type: f.type, options: f.options || [], default: f.default, readOnly: !!f.readOnly });
     let v = sv[f.key];
     if (v == null) v = '';
+    // 率类存比率（0.95），网格回显 ×100（95）与输入 UX 一致
+    if (f.type === 'percent' && v !== '') v = pctToDisplay(v);
     // 只读字段空值时回填小班预填值（每亩面积/每亩设计株树 等）
     if (f.readOnly && v === '' && pf[f.key] != null) v = String(pf[f.key]);
     // enum：旧 checkbox 布尔数据归一 + 空值显示默认值（有/无、是/否）
@@ -1518,8 +1546,9 @@ async function onGridCellChange(x, y, value) {
   if (!f || f.kind !== 'input' || f.readOnly) return; // 预填/computed/readOnly 行忽略
   const existing = Object.assign({}, state._gridSurveyMap[sc.id] || {});
   let v = value;
-  if (f.type === 'checkbox') v = (value === true || value === 'true' || value === 1 || value === '1' || value === '是' || value === '有');
-  if (f.type === 'percent') v = value === '' ? '' : Number(value);
+  if (f.type === 'checkbox') v = (value === true || value === 'true' || value === 1 || value === '1' || value === '有') ? '是' : '否';
+  // 率类：网格里输入 95（见 95%），落库存比率 0.95（不 ×100）
+  if (f.type === 'percent') v = value === '' ? '' : pctToStore(value);
   if (f.type === 'number') v = value === '' ? '' : Number(value);
   existing[f.key] = v;
   existing['inspector'] = state.user || '';
@@ -1528,7 +1557,7 @@ async function onGridCellChange(x, y, value) {
     if (cf.kind !== 'computed') return;
     const cv = computeFieldValue(cf.formula, existing);
     existing[cf.key] = cv;
-    if (state._grid && cv !== '') state._grid.setValueFromCoords(1, idx, cv);
+    if (state._grid && cv !== '') state._grid.setValueFromCoords(1, idx, fmtComputedDisplay(cf.formula, cv));
   });
   state._gridSurveyMap[sc.id] = existing;
   try {
@@ -1788,7 +1817,8 @@ function renderControl(f) {
       return `<input type="number" class="f-input" data-field="${f.key}" value="${escapeHtml(v)}" ${attrs}>`;
     }
     case 'percent':
-      return `<div class="input-with-suffix"><input type="number" class="f-input" data-field="${f.key}" value="${escapeHtml(v)}" min="0" max="100" step="1"><span class="suffix">%</span></div>`;
+      // 存比率（0.95），输入框显示 95（step 0.01 支持 95.24 等两位小数）
+      return `<div class="input-with-suffix"><input type="number" class="f-input" data-field="${f.key}" value="${escapeHtml(pctToDisplay(v))}" min="0" max="100" step="0.01"><span class="suffix">%</span></div>`;
     case 'date':
       return `<input type="date" class="f-input" data-field="${f.key}" value="${escapeHtml(v)}">`;
     case 'text':
@@ -1816,7 +1846,7 @@ function renderControl(f) {
       </div>`;
     case 'computed': {
       const cv = computeFieldValue(f.formula, state.formData);
-      return `<div class="computed-val" data-computed-val="${f.key}">${escapeHtml(cv === '' ? '自动计算' : cv)}</div>`;
+      return `<div class="computed-val" data-computed-val="${f.key}">${escapeHtml(cv === '' ? '自动计算' : fmtComputedDisplay(f.formula, cv))}</div>`;
     }
     case 'sample_array':
       return renderSamplePanel(f);
@@ -3984,6 +4014,9 @@ app.addEventListener('input', (e) => {
   }
   if (t.dataset && t.dataset.field) {
     let v = t.value;
+    // 率类：输入 95（见 95%），落库存比率 0.95（不 ×100）
+    const pf = (activeInputColumns() || []).find(x => x.key === t.dataset.field);
+    if (pf && pf.type === 'percent') v = pctToStore(v);
     state.formData[t.dataset.field] = v;
   }
 });

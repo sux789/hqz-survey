@@ -7,10 +7,10 @@
 断言清单（对应约束编号）:
     I1 行数勾稽   基本信息每分类 sheet 数据行数 == DB 该分类小班数（B5）
     I2 排序勾稽   数据行按（林班, 调查小班号）数字序非降（D2）
-    I3 株数勾稽   表1 AN=Σ样地种植株数、AP=Σ成活÷Σ种植×100±0.01（C9）
+    I3 株数勾稽   表1 AN=调查总株数(B34口径)、AP=Σ成活÷Σ种植（比率0-1）±0.0001（C9）
     I4 sheet 名   无 Excel 禁止字符且 ≤31 字符（D7）
     I5 块数勾稽   样地导出每 sheet 块数 == 该分类小班数（D6）
-    I6 合格率类型 合格率列写数值而非百分比字符串（D3）
+    I6 合格率类型 合格率列写数值（比率0-1）而非百分比字符串（D3）
 任一 FAIL 以退出码 1 结束。
 """
 import argparse
@@ -90,14 +90,14 @@ def i2_sort_order(ctx):
 
 
 def i3_sample_stats(ctx):
-    """I3 表1 AN=Σ样地种植株数、AP=Σ成活/Σ种植×100（有样地的小班）"""
+    """I3 表1 AN=调查总株数（B34口径）、AP=Σ成活÷Σ种植 比率0-1 ±0.0001（有样地的小班）"""
     problems = []
     ws = ctx.base_wb[exporter._TPL_SHEET_NAMES["人工造林"]]
-    # DB 侧聚合：table5 每小班的 samples
+    # DB 侧聚合：table1（人工造林）每小班 data（samples 存于各分类自身表 data_json，
+    # 旧 table5 已随水利水保/草原下线删除——此前查 table5 恒空致 I3 假通过）
     db_stats = {}
-    for rec in storage.get_survey_rows(ctx.pid, "table5"):
-        samples = (rec.get("data") or {}).get("samples") or []
-        st = exporter._sample_stats(samples)
+    for rec in storage.get_survey_rows(ctx.pid, "table1"):
+        st = exporter._sample_stats(rec.get("data") or {})
         if st["planted_total"]:
             db_stats[rec["subcompartment_id"]] = st
     # 导出侧：B 列小班号 → 行；需小班 id → 调查小班号映射
@@ -109,11 +109,11 @@ def i3_sample_stats(ctx):
         st = db_stats.get(sc_by_num.get(sc_num))
         if not st:
             continue
-        an = ws.cell(row=row, column=40).value   # AN 小班查数株数
-        ap = ws.cell(row=row, column=42).value   # AP 合格率
+        an = ws.cell(row=row, column=40).value   # AN 小班查数株数（调查总株数 B34 口径）
+        ap = ws.cell(row=row, column=42).value   # AP 合格率（比率 0-1，0.00% 格式显示）
         if an != st["planted_total"]:
-            problems.append(f"小班{sc_num} AN={an!r} != Σ种植 {st['planted_total']}")
-        if ap is None or abs(float(ap) - st["qualified_rate"]) > 0.01:
+            problems.append(f"小班{sc_num} AN={an!r} != 调查总株数 {st['planted_total']}")
+        if ap is None or abs(float(ap) - st["qualified_rate"]) > 0.0001:
             problems.append(f"小班{sc_num} AP={ap!r} != 合格率 {st['qualified_rate']}")
     return problems
 

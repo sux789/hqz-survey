@@ -9,8 +9,10 @@
       小班查数株数 = 调查总株数（与样地模板 B34 同口径）
                      = round(Σ种植÷个数÷150×单个网格面积×种植网格数量)，
                      个数 = 手写 sm_total_count（>0 生效）回退实际样地数
-      合格率      = Σ成活÷Σ种植×100（写数值如 95.24）
-      合格株树    = round(查数株数×合格率÷100)
+      合格率      = Σ成活÷Σ种植（比率 0-1，如 0.9524；模板列已设 0.00%
+                     百分比格式，Excel 显示 95.24%；分派公式阈值 0.9/0.4
+                     亦按比率比较——禁止 ×100 落库/落表）
+      合格株树    = round(查数株数×合格率)
   - 手写签字导出为图片：签字 canvas 存 data_json（inspector_sign /
     co_inspector_sign，PNG data URL），导出时裁白边+等比缩放后以图片
     插入签字列（表1 AR/AU、表2 BI/BL、表3 AV/AY）
@@ -129,7 +131,7 @@ _TPL_COL_MAPS = {
         'AM': ('tend_rate', 'input'),
         'AN': ('planted_total', 'sample_stat'),     # 小班查数株数 = 调查总株数（B34 口径）
         'AO': ('qualified_count', 'sample_stat'),   # 合格株树 = 查数株数×合格率
-        'AP': ('qualified_rate', 'sample_stat'),    # 合格率 = Σ成活/Σ种植×100
+        'AP': ('qualified_rate', 'sample_stat'),    # 合格率 = Σ成活/Σ种植（比率，0.00% 格式显示）
         'AQ': ('design_count', 'prefilled'),        # 小班设计株树（GDB 小班设计株树/需苗量）
         'AR': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
         'AS': ('inspect_time', 'input'),
@@ -287,6 +289,16 @@ _SAMPLE_DATA_SLOTS = 23   # 模板预留样地槽位数（行4-26）
 # 公式内单元格引用（$A$1 / A1 形式），块复制时行号偏移用
 _CELL_RE = re.compile(r'(\$?[A-Z]{1,2}\$?)(\d+)')
 
+# 率类列（百分比格式 0.00%）：合格率 + 成活率等级3列 + 施工/建档/管护/抚育率4列。
+# 模板仅 R5 示例行带格式，导出写行 6+ 时单元格为新建（General），
+# 写值/写分派公式时须补设 number_format，否则比率 0.9524 显示为裸数字。
+_RATE_COL_FMT = '0.00%'
+_RATE_COLS = {
+    "table1": {"O", "P", "Q", "AP", "AG", "AI", "AK", "AM"},
+    "table2": {"U", "V", "W", "BG", "AX", "AZ", "BB", "BD"},
+    "table3": {"P", "Q", "R", "AT", "AK", "AM", "AO", "AQ"},
+}
+
 
 # ════════════════════════════════════════════
 # 通用工具
@@ -353,8 +365,9 @@ def _sample_stats(data):
                   个数 = 手写 sm_total_count（>0 生效）回退实际样地数；
                   个数或Σ种植为 0 → 空（同模板 IF(OR(B27=0,B29=0),"",…) 守卫），
                   网格面积/数量未填 → 结果为 0（同模板 B32/B33 空参与乘法）
-    合格率      = Σ成活÷Σ种植×100（数值如 95.24）
-    合格株树    = round(查数株数×合格率÷100)
+    合格率      = Σ成活÷Σ种植（比率 0-1 如 0.9524，round 4 位；模板合格率列
+                  已设 0.00% 百分比格式，Excel 显示 95.24%——不 ×100）
+    合格株树    = round(查数株数×合格率)
     """
     data = data if isinstance(data, dict) else {}
     samples = data.get("samples")
@@ -376,7 +389,9 @@ def _sample_stats(data):
         alive += _f(s.get("alive"))
     if not planted:
         return {"planted_total": None, "qualified_count": None, "qualified_rate": None}
-    rate = round(alive / planted * 100, 2)
+    # 合格率 = 比率 0-1（不 ×100）：模板合格率列/成活率等级列均为 0.00%
+    # 百分比格式、分派公式阈值 0.9/0.4 按比率比较（CONSTRAINTS C8/C9/D3）
+    rate = round(alive / planted, 4)
     # 个数：手写 sm_total_count 优先（与 B27/前端 smSummaryComputed 同口径）
     n = None
     hand_n = data.get("sm_total_count")
@@ -394,7 +409,7 @@ def _sample_stats(data):
     return {
         "planted_total": total,
         "qualified_rate": rate,
-        "qualified_count": round(total * rate / 100) if total is not None else None,
+        "qualified_count": round(total * rate) if total is not None else None,
     }
 
 
@@ -453,7 +468,15 @@ def _resolve_cell(key, source, prefilled, input_data, extras, stats, sc_row, fie
                 # 默认值，库里缺 key，导出时按 schema 默认补齐
                 return _norm_enum(val, f)
             if val not in ('', None):
-                if t in ('number', 'percent'):
+                if t == 'percent':
+                    # 率类存比率 0-1（不 ×100）：保留 4 位小数（0.9524），
+                    # 配合模板 0.00% 百分比格式显示 95.24%——不走 _fmt_num
+                    # 的 2 位舍入（0.9524 → 0.95 会丢精度）
+                    try:
+                        return round(float(val), 4)
+                    except (ValueError, TypeError):
+                        return val
+                if t == 'number':
                     return _fmt_num(val)
                 if t == 'photo':
                     if isinstance(val, list):
@@ -579,6 +602,7 @@ def export_base(pid, output_path=None, category=None):
         need_extra = any(src == 'extra' or (key or '').startswith('sample_coord')
                          for _, (key, src) in _TPL_COL_MAPS[table_id].items())
 
+        rate_cols = _RATE_COLS.get(table_id, set())
         for i, sc_row in enumerate(sc_rows):
             row_num = _BASE_DATA_START + i
             prefilled = S.map_subcompartment_to_prefilled(sc_row.get("data", {}))
@@ -594,13 +618,17 @@ def export_base(pid, output_path=None, category=None):
                         _insert_sign_image(ws, row_num, _col_number(col_letter), val)
                     continue
                 if val not in ('', None):
-                    ws.cell(row=row_num, column=_col_number(col_letter), value=val)
+                    cell = ws.cell(row=row_num, column=_col_number(col_letter), value=val)
+                    if col_letter in rate_cols:
+                        cell.number_format = _RATE_COL_FMT
             # 模板公式代入下一行：该行该列没写值的，填行偏移后的模板公式
             # （如 R6 的 O 列 = IF(AP6>=0.9,AP6,"")，由 _shift_formula 平移行号）
             for c, f in tpl_formulas.items():
-                if ws.cell(row=row_num, column=c).value in (None, ""):
-                    ws.cell(row=row_num, column=c).value = _shift_formula(
-                        f, row_num - _BASE_DATA_START)
+                cell = ws.cell(row=row_num, column=c)
+                if cell.value in (None, ""):
+                    cell.value = _shift_formula(f, row_num - _BASE_DATA_START)
+                    if _col_letter(c) in rate_cols:
+                        cell.number_format = _RATE_COL_FMT
         stats["sheets"][cat] = len(sc_rows)
 
     if output_path is None:

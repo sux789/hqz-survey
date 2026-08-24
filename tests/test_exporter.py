@@ -109,8 +109,9 @@ def sample_data(sample_project):
     }, forest_compartment=1, subcompartment=3, row_index=0)
 
     # sc1 录入：样地 2 个（种植 100+100，成活 90+85）+ 汇总手写项
+    # survival_pass 存比率 0-1（新口径，2026-08-21：率类不 ×100）
     storage.upsert_survey_row(pid, "table1", sc1, {
-        "survival_pass": "85",
+        "survival_pass": "0.85",
         "remark": "测试备注",
         "inspect_time": "2026-08-10",
         "samples": [
@@ -138,11 +139,11 @@ class TestSampleStats:
     ]}
 
     def test_stats_formula(self):
-        """网格 5000×4、实际个数 2：查数=13333，率=87.5，合格=11666。"""
+        """网格 5000×4、实际个数 2：查数=13333，率=0.875（比率），合格=11666。"""
         stats = exporter._sample_stats(
             dict(self.BASE, sm_grid_area="5000", sm_grid_count="4"))
         assert stats["planted_total"] == 13333
-        assert stats["qualified_rate"] == 87.5
+        assert stats["qualified_rate"] == 0.875
         assert stats["qualified_count"] == 11666
 
     def test_stats_manual_count(self):
@@ -157,7 +158,7 @@ class TestSampleStats:
         """网格未填（同模板 B32/B33 空参与乘法）：查数=0，合格=0，率不变。"""
         stats = exporter._sample_stats(dict(self.BASE))
         assert stats["planted_total"] == 0
-        assert stats["qualified_rate"] == 87.5
+        assert stats["qualified_rate"] == 0.875
         assert stats["qualified_count"] == 0
 
     def test_stats_empty(self):
@@ -195,16 +196,19 @@ class TestExportBase:
         assert ws.cell(row=6, column=43).value == 11000
 
     def test_input_and_sample_stats(self, sample_data):
-        """白色录入列 + 样地统计列（AN/AO/AP）。"""
+        """白色录入列 + 样地统计列（AN/AO/AP）——率类比率 + 0.00% 格式。"""
         output, _ = exporter.export_base(sample_data["pid"])
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        # sc1 在行6：O 成活率 85
-        assert ws.cell(row=6, column=15).value == 85
-        # AN 查数株数 = 调查总株数 13333（B34 口径），AO 合格株树 11666，AP 合格率 87.5
+        # sc1 在行6：O 成活率 0.85（比率，录入值覆盖公式）+ 百分比格式
+        assert ws.cell(row=6, column=15).value == 0.85
+        assert ws.cell(row=6, column=15).number_format == '0.00%'
+        # AN 查数株数 = 调查总株数 13333（B34 口径），AO 合格株树 11666，AP 合格率 0.875
         assert ws.cell(row=6, column=40).value == 13333
         assert ws.cell(row=6, column=41).value == 11666
-        assert ws.cell(row=6, column=42).value == 87.5
+        assert ws.cell(row=6, column=42).value == 0.875
+        # 行6 为模板行5 之后的导出行：率类单元格须补设 0.00% 格式（显示 87.50%）
+        assert ws.cell(row=6, column=42).number_format == '0.00%'
         # AT 备注
         assert ws.cell(row=6, column=46).value == "测试备注"
 
@@ -217,6 +221,23 @@ class TestExportBase:
         assert ws.cell(row=5, column=40).value in (None, "")
         # O 列模板公式（成活率分派）代入数据行（行5 偏移 0）
         assert ws.cell(row=5, column=15).value == '=IF(AP5>=0.9,AP5,"")'
+
+    def test_percent_ratio_precision(self, sample_data):
+        """率类比率保留 4 位小数：0.9524 不被 _fmt_num 的 2 位舍入截成 0.95。"""
+        pid = sample_data["pid"]
+        sc2 = sample_data["sc2"]
+        storage.upsert_survey_row(pid, "table1", sc2, {
+            "survival_pass": "0.9524",     # O 列
+            "construction_rate": "0.9844",  # AG 列（施工率）
+        }, "张三")
+        output, _ = exporter.export_base(pid)
+        wb = openpyxl.load_workbook(output)
+        ws = wb["2023年度人工造林"]
+        # sc2 排序后行5
+        assert ws.cell(row=5, column=15).value == 0.9524   # O
+        assert ws.cell(row=5, column=15).number_format == '0.00%'
+        assert ws.cell(row=5, column=33).value == 0.9844   # AG
+        assert ws.cell(row=5, column=33).number_format == '0.00%'
 
     def test_category_filter(self, sample_data):
         """按分类导出：仅保留当前分类 sheet，其余分类 sheet 移除。"""

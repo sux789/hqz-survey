@@ -120,11 +120,11 @@ class TestSchema:
         assert "survival_pass" in errors
 
     def test_validate_row_percent_out_of_range(self):
-        """测试百分比超范围。"""
+        """测试百分比超范围（存比率 0-1，>1 即非法）。"""
         data = {
             "inspector": "张三",
             "inspect_time": "2026-08-10",
-            "survival_pass": "150",  # 超过100
+            "survival_pass": "1.5",  # 比率超过 1
         }
         ok, errors = S.validate_row("table1", data)
         assert not ok
