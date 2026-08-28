@@ -1774,6 +1774,7 @@ input, select, textarea, button {
 /* ── 签字卡片（表格下方）── */
 .sign-bar {
   display: flex;
+  flex-wrap: wrap;   /* 6 个签字位在窄屏自动换行（每行约 3 个） */
   gap: 12px;
   padding: 10px 4px 6px;
   margin-top: 8px;
@@ -1781,7 +1782,7 @@ input, select, textarea, button {
 }
 .sign-card {
   flex: 1 1 0;
-  min-width: 0;
+  min-width: 96px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);

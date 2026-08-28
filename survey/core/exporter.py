@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""xlsx 导出器 — 双模板导出（基本信息 + 样地）+ 轨迹 GPX。
+"""xlsx 导出器 — 双模板导出（基本信息 + 样地）+ 轨迹 SHP。
 
 设计原则（2026-08 重构，不兼容旧数据）：
   - 仅三个分类：人工造林(table1)/封山育林(table2)/退化林修复(table3)
@@ -14,8 +14,9 @@
                      亦按比率比较——禁止 ×100 落库/落表）
       合格株树    = round(查数株数×合格率)
   - 手写签字导出为图片：签字 canvas 存 data_json（inspector_sign /
-    co_inspector_sign，PNG data URL），导出时裁白边+等比缩放后以图片
-    插入签字列（表1 AR/AU、表2 BI/BL、表3 AV/AY）
+    co_inspector_sign[2-5]，PNG data URL），导出时裁白边+等比缩放后以
+    图片插入签字列（表1 AR/AU-AY、表2 BI/BL-BP、表3 AV/AY-BC，
+    2026-08-25 起每表 6 个签字位：验收人员 + 配合验收人员×5）
   - 样地页汇总手写项（sm_* 键）写入样地模板 B27-B39（个数/网格面积/数量/
     撑杆/覆膜/验收人/验收日期/备注）；样地行备注（sample.remark）写 I 列
   - 死亡株数 = 样地模板 E 列公式（种植-成活）自动算，不录入
@@ -133,14 +134,19 @@ _TPL_COL_MAPS = {
         'AO': ('qualified_count', 'sample_stat'),   # 合格株树 = 查数株数×合格率
         'AP': ('qualified_rate', 'sample_stat'),    # 合格率 = Σ成活/Σ种植（比率，0.00% 格式显示）
         'AQ': ('design_count', 'prefilled'),        # 小班设计株树（GDB 小班设计株树/需苗量）
-        'AR': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
-        'AS': ('inspect_time', 'input'),
-        'AT': ('remark', 'input'),
-        'AV': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
-        'AW': ('sample_coord_y', 'input'),          # 打卡坐标y
-        'AX': ('track', 'extra'),                   # 轨迹 GPX 文件名
-        'AY': ('photos', 'extra'),                  # 小班照片文件名
-        'AU': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
+        'AR': ('inspector', 'input'),               # 验收人员（文本，2026-08-26 模板新增列）
+        'AS': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
+        'AT': ('inspect_time', 'input'),
+        'AU': ('remark', 'input'),
+        'AV': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
+        'AW': ('co_inspector_sign2', 'sign'),       # 配合验收人员2 手写签字
+        'AX': ('co_inspector_sign3', 'sign'),       # 配合验收人员3 手写签字
+        'AY': ('co_inspector_sign4', 'sign'),       # 配合验收人员4 手写签字
+        'AZ': ('co_inspector_sign5', 'sign'),       # 配合验收人员5 手写签字
+        'BA': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
+        'BB': ('sample_coord_y', 'input'),          # 打卡坐标y
+        'BC': ('track', 'extra'),                   # 轨迹（SHP name 属性=调查小班号）
+        'BD': ('photos', 'extra'),                  # 小班照片文件名
     },
     "table2": {  # 表2－封山育林验收因子表（新布局：B调查小班号 F小班 R造林树种 T补植面积 AF优势树种 AG封前地类 AI郁闭度 BH小班设计株树）
         'A': ('city', 'prefilled'),
@@ -203,14 +209,19 @@ _TPL_COL_MAPS = {
         'BF': ('qualified_count', 'sample_stat'),   # 合格株树
         'BG': ('qualified_rate', 'sample_stat'),    # 合格率
         'BH': ('design_count', 'prefilled'),        # 小班设计株树（GDB 绿色）
-        'BI': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
-        'BJ': ('inspect_time', 'input'),
-        'BK': ('remark', 'input'),
-        'BL': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
-        'BM': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
-        'BN': ('sample_coord_y', 'input'),          # 打卡坐标y
-        'BO': ('track', 'extra'),                   # 轨迹 GPX 文件名
-        'BP': ('photos', 'extra'),                  # 小班照片文件名
+        'BI': ('inspector', 'input'),               # 验收人员（文本，2026-08-26 模板新增列）
+        'BJ': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
+        'BK': ('inspect_time', 'input'),
+        'BL': ('remark', 'input'),
+        'BM': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
+        'BN': ('co_inspector_sign2', 'sign'),       # 配合验收人员2 手写签字
+        'BO': ('co_inspector_sign3', 'sign'),       # 配合验收人员3 手写签字
+        'BP': ('co_inspector_sign4', 'sign'),       # 配合验收人员4 手写签字
+        'BQ': ('co_inspector_sign5', 'sign'),       # 配合验收人员5 手写签字
+        'BR': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
+        'BS': ('sample_coord_y', 'input'),          # 打卡坐标y
+        'BT': ('track', 'extra'),                   # 轨迹（SHP name 属性=调查小班号）
+        'BU': ('photos', 'extra'),                  # 小班照片文件名
     },
     "table3": {  # 表3-退化林修复验收因子表（新布局：M造林树种 O补植面积 AA修复措施 AB修复方式 AC辅助措施 AU小班设计株树）
         'A': ('city', 'prefilled'),
@@ -260,14 +271,19 @@ _TPL_COL_MAPS = {
         'AS': ('qualified_count', 'sample_stat'),   # 合格株树
         'AT': ('qualified_rate', 'sample_stat'),    # 合格率
         'AU': ('design_count', 'prefilled'),        # 小班设计株树（GDB 绿色）
-        'AV': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
-        'AW': ('inspect_time', 'input'),
-        'AX': ('remark', 'input'),
-        'AY': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
-        'AZ': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
-        'BA': ('sample_coord_y', 'input'),          # 打卡坐标y
-        'BB': ('track', 'extra'),                   # 轨迹 GPX 文件名
-        'BC': ('photos', 'extra'),                  # 小班照片文件名
+        'AV': ('inspector', 'input'),               # 验收人员（文本，2026-08-26 模板新增列）
+        'AW': ('inspector_sign', 'sign'),           # 验收人员手写签字（PNG 图片）
+        'AX': ('inspect_time', 'input'),
+        'AY': ('remark', 'input'),
+        'AZ': ('co_inspector_sign', 'sign'),        # 配合验收人员手写签字（PNG 图片）
+        'BA': ('co_inspector_sign2', 'sign'),       # 配合验收人员2 手写签字
+        'BB': ('co_inspector_sign3', 'sign'),       # 配合验收人员3 手写签字
+        'BC': ('co_inspector_sign4', 'sign'),       # 配合验收人员4 手写签字
+        'BD': ('co_inspector_sign5', 'sign'),       # 配合验收人员5 手写签字
+        'BE': ('sample_coord_x', 'input'),          # 打卡坐标x（回退 extras 打卡）
+        'BF': ('sample_coord_y', 'input'),          # 打卡坐标y
+        'BG': ('track', 'extra'),                   # 轨迹（SHP name 属性=调查小班号）
+        'BH': ('photos', 'extra'),                  # 小班照片文件名
     },
 }
 
@@ -358,11 +374,30 @@ def _fmt_num(val):
     return round(num, 2)
 
 
+def _valid_sample(s):
+    """有效样地判定（2026-08-25 口径）：样地面积与种植株数均已填写才参与导出/统计。"""
+    return (isinstance(s, dict)
+            and s.get("area") not in ("", None)
+            and s.get("planted") not in ("", None))
+
+
+def _inspect_date_of(data):
+    """记录的验收日期（YYYY-MM-DD）：取 inspect_time 前 10 位。
+
+    打卡自动填/手填均为日期或日期时间字符串；空值返回 ''。
+    """
+    v = (data or {}).get("inspect_time")
+    return str(v)[:10] if v not in (None, "") else ""
+
+
 def _sample_stats(data):
     """样地聚合统计（苗木合格率组），口径与样地页汇总/模板 B34 一致。
 
+    仅统计有效样地（面积+种植株数已填，_valid_sample）——与样地导出
+    行过滤同口径，保证 I3 勾稽（base AN == 样地 B34）。
+
     小班查数株数 = 调查总株数 = round(Σ种植 ÷ 个数 ÷ 150 × 单个网格面积 × 种植网格数量)
-                  个数 = 手写 sm_total_count（>0 生效）回退实际样地数；
+                  个数 = 手写 sm_total_count（>0 生效）回退有效样地数；
                   个数或Σ种植为 0 → 空（同模板 IF(OR(B27=0,B29=0),"",…) 守卫），
                   网格面积/数量未填 → 结果为 0（同模板 B32/B33 空参与乘法）
     合格率      = Σ成活÷Σ种植（比率 0-1 如 0.9524，round 4 位；模板合格率列
@@ -382,7 +417,7 @@ def _sample_stats(data):
     alive = 0.0
     real_n = 0
     for s in samples if isinstance(samples, list) else []:
-        if not isinstance(s, dict):
+        if not _valid_sample(s):
             continue
         real_n += 1
         planted += _f(s.get("planted"))
@@ -490,7 +525,11 @@ def _resolve_cell(key, source, prefilled, input_data, extras, stats, sc_row, fie
         return stats.get(key)
     if source == 'extra':
         if key == 'track':
-            return _track_gpx_filename(sc_row) if (extras or {}).get('track') else ''
+            # 轨迹列 = SHP 属性表 name 字段（调查小班号）：单 shapefile 含全部
+            # 小班轨迹，Excel 行 ↔ SHP 要素靠它关联；不足 2 有效点的轨迹
+            # 不入 SHP，此处留空
+            track = _dedupe_track((extras or {}).get('track') or [])
+            return _track_shp_name(sc_row) if len(_track_coords(track)) >= 2 else ''
         if key == 'photos':
             names = [p.get('name', '') for p in ((extras or {}).get('photos') or [])
                      if isinstance(p, dict) and p.get('name')]
@@ -550,7 +589,8 @@ def _clear_base_data_region(ws):
             ws.cell(row=r, column=c).value = None
 
 
-def export_base(pid, output_path=None, category=None):
+def export_base(pid, output_path=None, category=None, inspect_date=None,
+                county=None):
     """导出项目基本信息 xlsx（tpl-base 模板，一项目一文件，3 分类 sheet）。
 
     每个分类 sheet 填入该项目该分类下全部小班（含未录入的小班，
@@ -561,6 +601,12 @@ def export_base(pid, output_path=None, category=None):
         output_path: 输出路径，None 则返回 BytesIO
         category: 可选，仅导出该分类（用户端 topbar「导出」按钮按当前分类导出）。
                   指定时输出文件只保留该分类 sheet，其余分类 sheet 移除。
+        inspect_date: 可选（2026-08-26），验收日期过滤（单日 YYYY-MM-DD）：
+                  仅导出记录 inspect_time 等于该日期的小班；过滤后该分类
+                  无数据则移除空 sheet，全部无数据 ValueError。
+        county: 可选（2026-08-26），县过滤：按小班 GDB data_json「县」字段
+                  精确匹配（如 华宁县/澄江市）；与 inspect_date 可叠加；
+                  过滤后无数据 ValueError（空 sheet 移除同上）。
 
     Returns:
         (output_path, stats) 元组
@@ -579,6 +625,10 @@ def export_base(pid, output_path=None, category=None):
         if category and cat != category:
             wb.remove(wb[sheet_name])
             continue
+        # sheet 名年度动态化（2026-08-25）：模板 sheet 名固定「2023年度X」，
+        # 多年度项目（如 2022/2024 年度）导出须改为项目实际年度，否则 sheet
+        # 名年度与项目不符。年度口径：项目名「(N 年度)」→ 小班 GDB 计划年度
+        # 众数 → 当前年（与 _sc_year 项目名回退一致）。
         table_id = GDB.GDB_CATEGORY_TO_TABLE.get(cat)
         table_def = S.get_table(table_id)
         if not table_def:
@@ -597,6 +647,20 @@ def export_base(pid, output_path=None, category=None):
         sc_rows.sort(key=_sc_sort_key)
         survey_map = {rec["subcompartment_id"]: rec.get("data", {}) or {}
                       for rec in storage.get_survey_rows(pid, table_id)}
+        # 验收日期/县过滤（2026-08-26）：仅保留匹配的小班；
+        # 过滤后无数据移除空 sheet（不过滤时保持原行为：空分类也保留 sheet）
+        if inspect_date:
+            sc_rows = [r for r in sc_rows
+                       if _inspect_date_of(survey_map.get(r["id"]) or {}) == inspect_date]
+        if county:
+            sc_rows = [r for r in sc_rows
+                       if str((r.get("data") or {}).get("县") or "") == county]
+        if inspect_date or county:
+            if not sc_rows:
+                wb.remove(ws)
+                continue
+        # 重命名 sheet：{年度}年度{分类}（与模板同名时等效 no-op）
+        ws.title = _sheet_safe(f"{_proj_sheet_year(project, sc_rows)}年度{cat}")
         # schema 字段类型索引（enum/number/percent/photo 转换用）
         field_types = {f["key"]: f for f in table_def.get("input_columns", [])}
         need_extra = any(src == 'extra' or (key or '').startswith('sample_coord')
@@ -636,6 +700,14 @@ def export_base(pid, output_path=None, category=None):
                     if _col_letter(c) in rate_cols:
                         cell.number_format = _RATE_COL_FMT
         stats["sheets"][cat] = len(sc_rows)
+
+    if (inspect_date or county) and not stats["sheets"]:
+        bits = []
+        if county:
+            bits.append(county)
+        if inspect_date:
+            bits.append(f"验收日期 {inspect_date}")
+        raise ValueError(f"{' + '.join(bits)} 无录入数据")
 
     if output_path is None:
         output = io.BytesIO()
@@ -689,6 +761,8 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, data):
     prefilled = S.map_subcompartment_to_prefilled(sc_row.get("data", {}))
     samples = data.get("samples", []) if isinstance(data, dict) else []
     samples = samples if isinstance(samples, list) else []
+    # 有效样地过滤（2026-08-25）：面积+种植株数均已填才导出（与统计同口径）
+    samples = [s for s in samples if _valid_sample(s)]
 
     # R1 标题（项目名称+类型+调查小班号）；R2 年度县乡；R3 列头（不动）
     # gdb_data：GDB 导入的小班属性（区别于参数 data＝调查记录 data_json）
@@ -776,7 +850,7 @@ def _fill_sample_block(ws, block_idx, cat, project_name, sc_row, data):
         except (ValueError, TypeError):
             n = None
     if n is None:
-        n = sum(1 for s in samples if isinstance(s, dict))
+        n = len(samples)
     ws.cell(row=base + 27, column=2, value=n)
 
     # 手写录入项（样地页汇总表单，data_json.sm_* 键）：
@@ -900,13 +974,74 @@ def export_samples(pid, output_path=None, subcompartment_id=None, category=None)
     return str(output_path), stats
 
 
-def export_samples_zip(pid, category=None):
+def export_samples_singlefile(pid, category=None, inspect_date=None):
+    """样地单文件导出（2026-08-25）：一个 xlsx，每小班一个 sheet。
+
+    sheet 名「分类-调查小班号」（与单小班模式口径一致，_sheet_safe 清理）；
+    仅含有有效样地（面积+种植株数已填，D22）的小班；分类过滤同 zip。
+    inspect_date（2026-08-26）：验收日期过滤，与基本信息同口径。
+    供 admin「样地单文件」链接：项目级全分类 / 分类级单分类。
+
+    Returns:
+        (BytesIO(xlsx), {"sheets": {sheet_name: 1}})
+    """
+    check_templates()
+    project = storage.get_project(pid)
+    if not project:
+        raise ValueError(f"项目 {pid} 不存在")
+    wb = openpyxl.load_workbook(_SAMPLE_TEMPLATE)
+    tpl_ws = wb[wb.sheetnames[0]]
+    _clear_sample_template_block(tpl_ws)
+    stats = {"project": project["name"], "sheets": {}}
+    used = {}
+
+    for cat in ([category] if category else list(_TPL_SHEET_NAMES)):
+        table_id = GDB.GDB_CATEGORY_TO_TABLE.get(cat)
+        if not table_id:
+            continue
+        sc_rows = storage.list_project_subcompartment_rows(pid, category=cat)
+        sc_rows.sort(key=_sc_sort_key)
+        survey_map = {rec["subcompartment_id"]: rec.get("data", {}) or {}
+                      for rec in storage.get_survey_rows(pid, table_id)}
+        for sc_row in sc_rows:
+            if inspect_date and _inspect_date_of(survey_map.get(sc_row["id"]) or {}) != inspect_date:
+                continue
+            data = survey_map.get(sc_row["id"], {}) or {}
+            samples = data.get("samples")
+            if not (isinstance(samples, list) and any(_valid_sample(s) for s in samples)):
+                continue  # 无有效样地的小班不出 sheet（与 zip 同口径 D22）
+            base = _sheet_safe(
+                f"{cat}-{sc_row.get('subcompartment') or sc_row.get('subcompartment_label') or ''}"
+            )
+            k = used.get(base, 0) + 1
+            used[base] = k
+            sheet_name = base if k == 1 else f"{base}_{k}"
+            ws = wb.copy_worksheet(tpl_ws)
+            ws.title = sheet_name
+            _fill_sample_block(ws, 0, cat, project["name"], sc_row, data)
+            stats["sheets"][sheet_name] = 1
+
+    wb.remove(tpl_ws)
+    if not stats["sheets"]:
+        if inspect_date:
+            raise ValueError(f"验收日期 {inspect_date} 无样地数据")
+        raise ValueError("该分类暂无样地数据" if category else "该项目暂无样地数据")
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output, stats
+
+
+def export_samples_zip(pid, category=None, inspect_date=None):
     """样地按小班拆分导出并打包 zip（后台「分类下载」）。
 
     每小班一个 xlsx（单小班模式：该分类一个 sheet、该小班一个块），
-    文件名 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx；
+    文件名 {调查小班号}号调查小班-{分类}-{年度}.xlsx（不含林班前缀，
+    2026-08-25 起；同名冲突自动追加 _2/_3 序号）；
     年度取小班计划年度（GDB）→ 项目名「(2023 年度)」→ 当前年；
-    同名冲突（跨村重复林班小班号）追加 _2/_3 序号。
+    仅导出含有效样地（面积+种植株数已填，2026-08-25）的小班，
+    全无有效样地时 ValueError；inspect_date（2026-08-26）验收日期
+    过滤与基本信息同口径（记录 inspect_time 匹配单日）。
 
     Returns:
         (BytesIO(zip), {"files": n})
@@ -916,11 +1051,37 @@ def export_samples_zip(pid, category=None):
     sc_rows.sort(key=_sc_sort_key)
     if not sc_rows:
         raise ValueError("该分类暂无小班数据")
+    # 各分类调查记录缓存：table_id → {小班id: data_json}
+    survey_maps = {}
+
+    def _survey_data(sc_row):
+        table_id = GDB.GDB_CATEGORY_TO_TABLE.get(sc_row.get("category") or "")
+        if not table_id:
+            return None
+        if table_id not in survey_maps:
+            survey_maps[table_id] = {rec["subcompartment_id"]: rec.get("data", {}) or {}
+                                     for rec in storage.get_survey_rows(pid, table_id)}
+        return survey_maps[table_id].get(sc_row["id"]) or {}
+
+    def _has_valid_samples(sc_row, data=None):
+        data = _survey_data(sc_row) if data is None else data
+        if data is None:
+            return False
+        samples = data.get("samples")
+        return any(_valid_sample(s) for s in samples) if isinstance(samples, list) else False
+
     buf = io.BytesIO()
     used = {}
     n = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for sc_row in sc_rows:
+            data = _survey_data(sc_row)
+            if data is None:
+                continue
+            if inspect_date and _inspect_date_of(data) != inspect_date:
+                continue  # 验收日期过滤：inspect_time 不匹配的小班跳过
+            if not _has_valid_samples(sc_row, data):
+                continue  # 无有效样地（面积+种植株数）的小班不出文件
             try:
                 out, _stats = export_samples(pid, subcompartment_id=sc_row["id"])
             except ValueError:
@@ -932,13 +1093,15 @@ def export_samples_zip(pid, category=None):
                         out.getvalue())
             n += 1
     if n == 0:
+        if inspect_date:
+            raise ValueError(f"验收日期 {inspect_date} 无样地数据")
         raise ValueError("该分类暂无样地数据")
     buf.seek(0)
     return buf, {"files": n}
 
 
 # ════════════════════════════════════════════
-# 轨迹 GPX 导出（ArcGIS Pro / ArcMap / QGIS 直接识别）
+# 轨迹 SHP 导出（ArcGIS Pro / ArcMap / QGIS 直接识别）
 # ════════════════════════════════════════════
 
 def _parse_year(v):
@@ -980,46 +1143,45 @@ def _sc_file_stem(sc_row):
 
 
 def _sc_file_base(sc_row):
-    """导出文件名主干（去扩展名）：{林班-小班|小班}号调查小班-{分类}-{年度}。"""
+    """导出文件名主干（去扩展名）：{调查小班号}号调查小班-{分类}-{年度}。
+
+    2026-08-25 起不含林班前缀（用户要求文件名最前面为纯调查小班号）；
+    跨林班同号小班由 export_samples_zip 的同名冲突 _2/_3 序号区分。
+    """
+    sc = sc_row.get("subcompartment")
+    if sc in (None, ""):
+        sc = sc_row.get("subcompartment_label")
     return "-".join(str(p).strip() for p in (
-        f"{_sc_file_stem(sc_row)}号调查小班",
+        f"{sc}号调查小班",
         sc_row.get("category") or "",
         _sc_year(sc_row),
     ) if p and str(p).strip())
 
 
-def _track_gpx_filename(sc_row):
-    """轨迹 GPX 文件名：{林班-小班|小班}号调查小班-{分类}-{年度}.gpx。
+def _dedupe_track(track):
+    """过滤连续重复点位并跳过无效点，保持顺序与时间戳。
 
-    2026-08-21 改版（与后台分类下载的样地文件命名统一）：
-    旧名「分类_乡镇_村_小班.gpx」→ 新名如「1号调查小班-人工造林-2023.gpx」。
-    Excel 轨迹列与 GPX zip 内文件名同源（本函数），改版后两处一致。
+    GPS watchPosition 精度受限常连续回传相同坐标（生产数据实测存在
+    大量连续重复点），不去重会导致 SHP 线要素叠加成一坨、点数虚高。
     """
-    return _sc_file_base(sc_row) + ".gpx"
-
-
-def _track_gpx(track, name):
-    """轨迹点列表 → GPX 1.1 文本。track = [{lng, lat, t}, ...]（WGS84）。"""
-    pts = []
+    out, prev = [], None
     for p in track:
         try:
-            lng = float(p.get("lng"))
-            lat = float(p.get("lat"))
+            cur = (float(p.get("lng")), float(p.get("lat")))
         except (TypeError, ValueError):
             continue
-        t = str(p.get("t") or "").strip()
-        time_el = f"<time>{t}</time>" if t else ""
-        pts.append(f'      <trkpt lat="{lat}" lon="{lng}">{time_el}</trkpt>')
-    if not pts:
-        return ""
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<gpx version="1.1" creator="hqz-survey" '
-        'xmlns="http://www.topografix.com/GPX/1/1">\n'
-        f'  <trk>\n    <name>{name}</name>\n    <trkseg>\n'
-        + "\n".join(pts)
-        + '\n    </trkseg>\n  </trk>\n</gpx>\n'
-    )
+        if cur != prev:
+            out.append(p)
+            prev = cur
+    return out
+
+
+def _track_shp_name(sc_row):
+    """轨迹在 SHP 属性表中的 name 字段值（= 调查小班号标签）。
+
+    Excel 轨迹列与 SHP 属性表同源（本函数），两处一致才能互相关联。
+    """
+    return sc_row.get("subcompartment_label") or _sc_file_stem(sc_row)
 
 
 def _track_coords(track):
@@ -1039,59 +1201,22 @@ def _track_times(track):
             if str(p.get("t") or "").strip()]
 
 
-def _proj_year(proj):
-    """项目年度：项目名「(2023 年度)」正则 → 当前年（与 admin _dl_year 同口径）。"""
-    m = re.search(r"(\d{4})\s*年度", (proj or {}).get("name") or "")
-    return m.group(1) if m else str(_date.today().year)
-
-
-def _dl_stem(proj, category):
-    """单文件轨迹（KML/SHP）文件主干：{分类}-{年度} 或 项目名（清路径非法字符）。"""
-    stem = f"{category}-{_proj_year(proj)}" if category else \
-        (proj or {}).get("name") or "轨迹"
-    return re.sub(r'[\\/:*?"<>|]+', "_", str(stem)).strip() or "轨迹"
-
-
-def _track_desc(sc_row, track):
-    """KML Placemark 描述：人类可读的小班摘要。"""
-    data = sc_row.get("data") if isinstance(sc_row.get("data"), dict) else {}
-    ts = _track_times(track)
-    bits = [
-        f"分类: {sc_row.get('category') or '—'}",
-        f"小班: {sc_row.get('subcompartment_label') or _sc_file_stem(sc_row)}",
-        f"乡镇: {data.get('乡镇') or '—'}",
-        f"村: {data.get('村') or '—'}",
-        f"点数: {len(track)}",
-    ]
-    if ts:
-        bits.append(f"起止: {ts[0]} ~ {ts[-1]}")
-    return " | ".join(bits)
-
-
-def _track_kml(doc_name, entries):
-    """entries = [(name, desc, coords)] → KML 2.2 文本。
-
-    全部小班各一个 Placemark（LineString）；ArcGIS 用 KML To Layer
-    转要素，Google Earth / 奥维可直接打开。
-    """
-    from xml.sax.saxutils import escape as _xml_escape
-    parts = []
-    for name, desc, coords in entries:
-        co = " ".join(f"{lng},{lat}" for lng, lat in coords)
-        d = (f"\n    <description>{_xml_escape(desc)}</description>"
-             if desc else "")
-        parts.append(
-            f"  <Placemark>\n    <name>{_xml_escape(name)}</name>{d}\n"
-            f"    <LineString><tessellate>1</tessellate>"
-            f"<coordinates>{co}</coordinates></LineString>\n  </Placemark>")
-    if not parts:
-        return ""
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
-        f'  <Document>\n    <name>{_xml_escape(doc_name)}</name>\n'
-        + "\n".join(parts) + "\n  </Document>\n</kml>\n"
-    )
+def _proj_sheet_year(project, sc_rows):
+    """基本信息 sheet 名年度（2026-08-25）：项目名「(N 年度)」→ 小班 GDB
+    计划年度众数 → 当前年。多年度项目不再错误显示模板固定的 2023。"""
+    m = re.search(r"(\d{4})\s*年度", (project or {}).get("name") or "")
+    if m:
+        return m.group(1)
+    from collections import Counter
+    years = []
+    for r in sc_rows or []:
+        d = r.get("data")
+        y = _parse_year(d.get("计划年度")) if isinstance(d, dict) else None
+        if y:
+            years.append(y)
+    if years:
+        return Counter(years).most_common(1)[0][0]
+    return str(_date.today().year)
 
 
 def _track_shp_props(sc_row, track):
@@ -1107,7 +1232,7 @@ def _track_shp_props(sc_row, track):
     except (TypeError, ValueError):
         sc = None
     return {
-        "name": sc_row.get("subcompartment_label") or _sc_file_stem(sc_row),
+        "name": _track_shp_name(sc_row),
         "category": sc_row.get("category") or "",
         "year": _sc_year(sc_row),
         "fc": fc,
@@ -1133,102 +1258,95 @@ def _write_tracks_shp(entries, out_path):
     gdf.to_file(out_path, encoding="utf-8")
 
 
-def export_tracks_zip(pid, category=None, fmt="gpx"):
-    """导出项目小班轨迹，打包 zip 返回。
+def _track_dir_base(sc_row):
+    """轨迹 zip 内小班目录名：{调查小班号}号调查小班-{分类}-{年度}。
 
-    fmt:
-      gpx（默认）— 每个有轨迹的小班一个 .gpx（tracks/ 目录，文件名与
-                   Excel 轨迹列同源）；ArcGIS 用 GPX To Features 转要素。
-      kml        — 单个 .kml（每小班一个 Placemark）；Google Earth/奥维
-                   直接打开，ArcGIS 用 KML To Layer 转要素。
-      shp        — 单个 shapefile（每小班一条 LineString 要素 + 属性表：
-                   小班/分类/年度/乡镇/村/点数/起止时间），WGS84，
-                   ArcGIS 10 双击直接打开（推荐）。
+    与样地 zip 文件名口径一致（无林班前缀 R16）；含分类+年度保证项目级
+    合并 zip（多分类目录拼接）时目录名不冲突；同分类内同名调查小班号
+    由 zip 侧 _2/_3 序号兜底。
+    """
+    sc = sc_row.get("subcompartment")
+    if sc in (None, ""):
+        sc = sc_row.get("subcompartment_label")
+    return "-".join(str(p).strip() for p in (
+        f"{sc}号调查小班",
+        sc_row.get("category") or "",
+        _sc_year(sc_row),
+    ) if p and str(p).strip())
 
-    KML/SHP 为线要素格式：不足 2 个有效点的轨迹跳过（GPX 不受影响）。
+
+def export_tracks_zip(pid, category=None):
+    """导出项目小班轨迹 zip：每小班一个独立 shapefile（目录隔离）。
+
+    2026-08-25 由单 shapefile 反转为按小班分文件（CONSTRAINTS R12 再反转，
+    R17）：zip 结构 {调查小班号}号调查小班/{调查小班号}号调查小班.shp
+    等组件（.shp/.shx/.dbf/.prj/.cpg）；shapefile 组件文件同名，必须按
+    目录隔离。每小班一条 LineString 要素 + 属性表（小班/分类/年度/
+    乡镇/村/点数/起止时间），WGS84 + UTF-8（.cpg 随附），ArcGIS 10
+    双击直接打开；单个 shapefile 仍可在 GIS 中追加（Append）。
+
+    连续重复点位自动去重（GPS watchPosition 精度受限常回传相同坐标）；
+    不足 2 个有效点的轨迹跳过（无法构成线要素）。
 
     Args:
         pid: 项目 ID
         category: 可选，仅导出该分类小班的轨迹（admin 分类下载）。
-        fmt: gpx / kml / shp。
 
     Returns:
-        (BytesIO(zip), {"fmt": str, "files": n, "tracks": n, "total_points": m})
+        (BytesIO(zip), {"fmt": "shp", "files": n, "tracks": n, "total_points": m})
     """
+    import os
+    import tempfile
     import zipfile
-    from xml.sax.saxutils import escape as _xml_escape
-
-    fmt = (fmt or "gpx").strip().lower()
-    if fmt not in ("gpx", "kml", "shp"):
-        raise ValueError(f"不支持的轨迹格式: {fmt}")
 
     sc_rows = storage.list_project_subcompartment_rows(pid, category=category)
     sc_rows.sort(key=_sc_sort_key)  # 按调查小班号排序，与 Excel 导出一致
-    # 收集有轨迹的小班（同名冲突追序号，与 GPX 文件名规则一致）
-    items, used = [], {}
+    # 收集有轨迹的小班（去重连续重复点）
+    items = []
     for sc_row in sc_rows:
-        track = (storage.get_extras(sc_row["id"]) or {}).get("track") or []
-        if not track:
-            continue
-        base = _sc_file_base(sc_row)
-        k = used.get(base, 0) + 1
-        used[base] = k
-        items.append((sc_row, track, base if k == 1 else f"{base}_{k}"))
+        track = _dedupe_track(
+            (storage.get_extras(sc_row["id"]) or {}).get("track") or [])
+        if track:
+            items.append((sc_row, track))
     if not items:
         raise ValueError("该项目暂无轨迹数据")
 
+    entries = []
+    for sc_row, track in items:
+        coords = _track_coords(track)
+        if len(coords) < 2:
+            continue  # 单点无法构成线要素
+        entries.append((sc_row, track, coords))
+    if not entries:
+        raise ValueError("轨迹均不足 2 个有效点，无法生成线要素")
+
+    total_pts = sum(len(c) for *_, c in entries)
+
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        if fmt == "gpx":
-            files, total_pts = 0, 0
-            for sc_row, track, base in items:
-                gpx = _track_gpx(
-                    track, _xml_escape(sc_row.get("subcompartment_label") or base))
-                if not gpx:
-                    continue
-                zf.writestr(f"tracks/{base}.gpx", gpx)
-                files += 1
-                total_pts += len(track)
-            if files == 0:
-                raise ValueError("该项目暂无轨迹数据")
-            buf.seek(0)
-            return buf, {"fmt": "gpx", "files": files, "tracks": files,
-                         "total_points": total_pts}
-
-        # kml / shp：单文件，全部小班合并
-        proj = storage.get_project(pid) or {}
-        stem = _dl_stem(proj, category)
-        entries = []
-        for sc_row, track, base in items:
-            coords = _track_coords(track)
-            if len(coords) < 2:
-                continue  # 单点无法构成线要素
-            entries.append((sc_row, track, base, coords))
-        if not entries:
-            raise ValueError("轨迹均不足 2 个有效点，无法生成线要素")
-        total_pts = sum(len(c) for *_, c in entries)
-
-        if fmt == "kml":
-            kml = _track_kml(stem, [
-                (sc_row.get("subcompartment_label") or base,
-                 _track_desc(sc_row, track), coords)
-                for sc_row, track, base, coords in entries])
-            zf.writestr(f"tracks/{stem}.kml", kml)
-            buf.seek(0)
-            return buf, {"fmt": "kml", "files": 1, "tracks": len(entries),
-                         "total_points": total_pts}
-
-        # shp：临时目录写出全部组件文件（.shp/.shx/.dbf/.prj/.cpg）再入 zip
-        import os
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
+    used = {}
+    # 每小班一个临时子目录写出独立 shapefile，再按目录入 zip
+    with tempfile.TemporaryDirectory() as td:
+        for sc_row, track, coords in entries:
+            base = _track_dir_base(sc_row)
+            k = used.get(base, 0) + 1
+            used[base] = k
+            dirname = base if k == 1 else f"{base}_{k}"
+            sub = os.path.join(td, dirname)
+            os.makedirs(sub)
             _write_tracks_shp(
-                [(_track_shp_props(sc_row, track), coords)
-                 for sc_row, track, base, coords in entries],
-                os.path.join(td, stem + ".shp"))
-            for fn in sorted(os.listdir(td)):
-                with open(os.path.join(td, fn), "rb") as f:
-                    zf.writestr(f"tracks/{fn}", f.read())
-        buf.seek(0)
-        return buf, {"fmt": "shp", "files": 1, "tracks": len(entries),
-                     "total_points": total_pts}
+                [(_track_shp_props(sc_row, track), coords)],
+                os.path.join(sub, dirname + ".shp"))
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, files in os.walk(td):
+                for fn in sorted(files):
+                    full = os.path.join(root, fn)
+                    rel = os.path.relpath(full, td)
+                    with open(full, "rb") as f:
+                        zf.writestr(rel, f.read())
+    # 关键：必须在 with 块外 seek(0)。ZipFile.close() 写中央目录后指针停在
+    # EOF——块内 seek 无效（close 会把指针推回末尾）；send_file 从当前位置
+    # 读 → 生产环境 200 + Content-Length 正确但 0 字节空下载（2026-08-24
+    # 事故）。测试用 ZipFile 打开不受指针影响，唯有断言 buf.tell()==0 才能兜住
+    buf.seek(0)
+    return buf, {"fmt": "shp", "files": len(entries), "tracks": len(entries),
+                 "total_points": total_pts}

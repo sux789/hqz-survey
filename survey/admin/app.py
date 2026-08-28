@@ -24,7 +24,7 @@
   GET/POST/DELETE /admin/api/projects/<pid>/prefilled/<tid>  预填数据
   GET  /admin/api/projects/<pid>/export_base     导出基本信息 xlsx（?cat=分类 单 sheet 不打包）
   GET  /admin/api/projects/<pid>/export_samples  导出样地（?cat=分类：每小班一个 xlsx 打包 zip）
-  GET  /admin/api/projects/<pid>/export_tracks   导出轨迹 zip（?cat=分类 仅该分类；?fmt=gpx|kml|shp）
+  GET  /admin/api/projects/<pid>/export_tracks   导出轨迹 zip（单个 shapefile；?cat=分类 仅该分类）
   GET  /admin/api/projects/<pid>/categories      项目含有的分类清单
 """
 import hashlib
@@ -46,6 +46,7 @@ from flask import Flask, request, jsonify, render_template, send_file, session, 
 from survey.core import schema as S
 from survey.core import storage
 from survey.core import exporter
+from survey.core import export_cache
 from survey.core import gdb as GDB
 from survey.core import auth as A
 
@@ -567,6 +568,7 @@ def api_project_delete(pid):
     except Exception:
         pass
     storage.delete_project(pid)
+    export_cache.cleanup_project(pid)  # 顺带清理导出缓存（2026-08-25）
     return jsonify({"ok": True})
 
 
@@ -619,21 +621,69 @@ def _dl_year(proj):
     return m.group(1) if m else str(_date.today().year)
 
 
+def _parse_inspect_date():
+    """?inspect_date=YYYY-MM-DD（可选，单日）：格式非法返回错误响应元组。"""
+    from datetime import datetime
+    d = request.args.get("inspect_date", "").strip()
+    if not d:
+        return None, None
+    try:
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        return None, (jsonify({"error": "验收日期格式应为 YYYY-MM-DD"}), 400)
+    return d, None
+
+
+@app.route("/api/projects/<pid>/counties")
+@_admin_required
+def api_project_counties(pid):
+    """项目含有的县列表（去重排序，导出选项下拉用，2026-08-26）。
+
+    来源：小班 GDB data_json「县」字段（GDB+旧批次两种行来源均含）。
+    """
+    if not storage.get_project(pid):
+        return jsonify({"error": "项目不存在"}), 404
+    counties = []
+    for row in storage.list_project_subcompartment_rows(pid):
+        v = str((row.get("data") or {}).get("县") or "").strip()
+        if v and v not in counties:
+            counties.append(v)
+    return jsonify({"counties": sorted(counties)})
+
+
 @app.route("/api/projects/<pid>/export_base")
 @_admin_required
 def api_export_base(pid):
     """导出基本信息 xlsx（tpl-base 模板，一项目一文件，3 分类 sheet）。
 
     ?cat=<分类> 仅导出该分类 sheet（分类下载：不打包，直接下载单个 xlsx）。
+    ?inspect_date=YYYY-MM-DD（2026-08-26）：验收日期过滤（单日），仅导出
+    记录 inspect_time 等于该日期的小班；无该日期数据 404 提示；文件名
+    追加 _验收{日期}。
+    ?county=<县>（2026-08-26）：县过滤（小班 GDB「县」字段精确匹配，如
+    华宁县/澄江市），文件名追加 _{县}；可与验收日期叠加。样地导出不
+    支持县过滤（口径见 D28/D30）。
     """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
     cat = request.args.get("cat", "").strip()
+    idate, err = _parse_inspect_date()
+    if err:
+        return err
+    county = request.args.get("county", "").strip()
     try:
-        output, stats = exporter.export_base(pid, category=cat or None)
-        filename = (f"{cat}-{_dl_year(proj)}-基本信息.xlsx" if cat
-                    else f"{proj['name']}_基本信息.xlsx")
+        output, stats = exporter.export_base(pid, category=cat or None,
+                                             inspect_date=idate,
+                                             county=county or None)
+        parts = []
+        if county:
+            parts.append(county)
+        if idate:
+            parts.append(f"验收{idate}")
+        suffix = ("_" + "_".join(parts)) if parts else ""
+        filename = (f"{cat}-{_dl_year(proj)}-基本信息{suffix}.xlsx" if cat
+                    else f"{proj['name']}_基本信息{suffix}.xlsx")
         return send_file(
             output,
             as_attachment=True,
@@ -651,32 +701,53 @@ def api_export_base(pid):
 @app.route("/api/projects/<pid>/export_samples")
 @_admin_required
 def api_export_samples(pid):
-    """导出样地 xlsx（tpl-样地 模板，每分类一个 sheet，块结构）。
+    """导出样地 zip（每小班一个 xlsx；2026-08-25 起项目级也是 zip 打包）。
 
-    ?cat=<分类>（分类下载）：按小班拆分打包 zip——每小班一个 xlsx，
-    文件名 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx。
+    ?cat=<分类>（分类下载）：仅该分类，文件名 {分类}-{年度}-样地.zip；
+    无 cat（项目级）：全分类合并，文件名 {项目名}_样地.zip。
+    均走 export_cache 缓存（命中直接发文件，未命中同步生成并回写）。
+
+    ?single=1（2026-08-25 单文件版本）：一个 xlsx 每小班一个 sheet
+    「分类-调查小班号」，仅含有有效样地的小班；文件名前缀项目名：
+    {项目名}_样地.xlsx / {项目名}_{分类}_样地.xlsx（?cat 同步过滤）。
+
+    ?inspect_date=YYYY-MM-DD（2026-08-26）：验收日期过滤（单日，zip 与
+    单文件均支持，绕过缓存），仅导出记录 inspect_time 等于该日期的小班；
+    文件名追加 _验收{日期}。
     """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
     cat = request.args.get("cat", "").strip()
+    idate, err = _parse_inspect_date()
+    if err:
+        return err
+    suffix = f"_验收{idate}" if idate else ""
     try:
-        if cat:
-            output, stats = exporter.export_samples_zip(pid, category=cat)
-            filename = f"{cat}-{_dl_year(proj)}-样地.zip"
+        if request.args.get("single") == "1":
+            output, _stats = exporter.export_samples_singlefile(
+                pid, category=cat or None, inspect_date=idate)
+            filename = (f"{proj['name']}_{cat}_样地{suffix}.xlsx" if cat
+                        else f"{proj['name']}_样地{suffix}.xlsx")
             return send_file(
                 output,
                 as_attachment=True,
                 download_name=filename,
-                mimetype="application/zip",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-        output, stats = exporter.export_samples(pid)
-        filename = f"{proj['name']}_样地.xlsx"
+        if cat:
+            output, _stats = export_cache.cached_or_generate(
+                pid, cat, "samples", inspect_date=idate)
+            filename = f"{cat}-{_dl_year(proj)}-样地{suffix}.zip"
+        else:
+            output = export_cache.cached_or_generate_project(
+                pid, "samples", inspect_date=idate)
+            filename = f"{proj['name']}_样地{suffix}.zip"
         return send_file(
             output,
             as_attachment=True,
             download_name=filename,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mimetype="application/zip",
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
@@ -689,23 +760,23 @@ def api_export_samples(pid):
 @app.route("/api/projects/<pid>/export_tracks")
 @_admin_required
 def api_export_tracks(pid):
-    """导出项目轨迹 zip（ArcGIS 可直接识别）。
+    """导出项目轨迹 zip：每小班一个独立 shapefile（目录隔离，2026-08-25
+    R12 再反转 R17），ArcGIS 10 双击直开，可逐个 Append。
 
     ?cat=<分类> 仅导出该分类小班的轨迹（项目管理「分类下载」）。
-    ?fmt=<gpx|kml|shp> 轨迹格式：gpx 每小班一个文件（默认）；
-      kml 单文件（Google Earth/奥维直接打开）；shp 单 shapefile
-      （每小班一条线要素 + 属性表，ArcGIS 10 双击直接打开，推荐）。
+    走 export_cache 缓存；项目级 = 各分类缓存 zip 合并。
     """
     proj = storage.get_project(pid)
     if not proj:
         return jsonify({"error": "项目不存在"}), 404
     cat = request.args.get("cat", "").strip()
-    fmt = request.args.get("fmt", "gpx").strip().lower()
     try:
-        output, stats = exporter.export_tracks_zip(pid, category=cat or None, fmt=fmt)
-        suffix = {"gpx": "", "kml": "KML", "shp": "SHP"}.get(stats.get("fmt", "gpx"), "")
-        filename = (f"{cat}-{_dl_year(proj)}-轨迹{suffix}.zip" if cat
-                    else f"{proj['name']}_轨迹{suffix or 'GPX'}.zip")
+        if cat:
+            output, _stats = export_cache.cached_or_generate(pid, cat, "tracks")
+            filename = f"{cat}-{_dl_year(proj)}-轨迹.zip"
+        else:
+            output = export_cache.cached_or_generate_project(pid, "tracks")
+            filename = f"{proj['name']}_轨迹.zip"
         return send_file(
             output,
             as_attachment=True,

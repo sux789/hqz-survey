@@ -134,8 +134,8 @@ class TestSampleStats:
     """查数株数 = 调查总株数（B34 口径）：round(Σ种植÷个数÷150×网格面积×网格数量)。"""
 
     BASE = {"samples": [
-        {"planted": 100, "alive": 90},
-        {"planted": 100, "alive": 85},
+        {"area": 100, "planted": 100, "alive": 90},
+        {"area": 100, "planted": 100, "alive": 85},
     ]}
 
     def test_stats_formula(self):
@@ -166,6 +166,28 @@ class TestSampleStats:
         assert stats["planted_total"] is None
         assert stats["qualified_rate"] is None
         assert stats["qualified_count"] is None
+
+    def test_stats_invalid_samples_excluded(self):
+        """无效样地（缺面积或种植株数）不参与统计（2026-08-25 与导出同口径）。"""
+        stats = exporter._sample_stats({"samples": [
+            {"area": 100, "planted": 100, "alive": 90},
+            {"area": 100, "planted": "", "alive": 50},   # 缺种植株数
+            {"planted": 100, "alive": 50},               # 缺面积
+            {"area": 100, "alive": 50},                  # 缺种植株数
+            "垃圾行",
+        ]})
+        # 仅第 1 个有效：Σ种植=100、Σ成活=90、个数=1
+        assert stats["qualified_rate"] == 0.9
+
+    def test_sheet_year_dynamic(self, sample_project):
+        """sheet 名年度随项目名：2024 年度项目导出「2024年度人工造林」。"""
+        pid = storage.create_project("测试项目(2024 年度)", "测试人", "测试乡镇")["id"]
+        _insert_sc_row(pid, {"林班": 1, "小班": 5, "调查小班号": 5, "计划年度": 2023},
+                       forest_compartment=1, subcompartment=5)
+        output, _ = exporter.export_base(pid)
+        wb = openpyxl.load_workbook(output)
+        assert "2024年度人工造林" in wb.sheetnames
+        assert "2023年度人工造林" not in wb.sheetnames
 
 
 class TestExportBase:
@@ -210,8 +232,8 @@ class TestExportBase:
         assert ws.cell(row=6, column=42).value == 0.875
         # 行6 为模板行5 之后的导出行：率类单元格须补设 0.00% 格式（显示 87.50%）
         assert ws.cell(row=6, column=42).number_format == '0.00%'
-        # AT 备注
-        assert ws.cell(row=6, column=46).value == "测试备注"
+        # AU 备注（验收人员列插入后右移）
+        assert ws.cell(row=6, column=47).value == "测试备注"
 
     def test_derived_dispatch_columns_formula_only(self, sample_data):
         """store:false 分派列（成活率等级 O/P/Q + 面积 S/AF/AH/AL）一律模板公式：
@@ -366,20 +388,21 @@ class TestExportBase:
         output, _ = exporter.export_base(pid)
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        assert ws.cell(row=5, column=48).value == 102.123456   # AV 打卡坐标x
-        assert ws.cell(row=5, column=49).value == 25.654321    # AW 打卡坐标y
+        assert ws.cell(row=5, column=53).value == 102.123456   # BA 打卡坐标x（验收人员列插入后右移）
+        assert ws.cell(row=5, column=54).value == 25.654321    # BB 打卡坐标y
 
     def test_mgmt_enum_defaults_exported(self, sample_data):
-        """管理情况 5 项（Z-AD）空值导出 schema 默认「有」；AR/AU 手写签字留空。"""
+        """管理情况 5 项（Z-AD）空值导出 schema 默认「有」；验收人员/签字留空。"""
         output, _ = exporter.export_base(sample_data["pid"])
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
         # sc1 未录入任何管理情况字段 → 全部默认「有」
         for col in range(26, 31):  # Z=26 ... AD=30
             assert ws.cell(row=5, column=col).value == "有", f"col {col}"
-        # AR/AU 手写签字不录入 → 留空
-        assert ws.cell(row=5, column=44).value in (None, "")  # AR
-        assert ws.cell(row=5, column=47).value in (None, "")  # AU
+        # AR 验收人员文本 / AS 签字 / AV 配合签字 未录入 → 留空
+        assert ws.cell(row=5, column=44).value in (None, "")  # AR 验收人员
+        assert ws.cell(row=5, column=45).value in (None, "")  # AS 签字
+        assert ws.cell(row=5, column=48).value in (None, "")  # AV 配合签字
 
     def test_mgmt_enum_saved_value_wins(self, sample_data):
         """已录入值优先于默认：mgmt_design=「无」导出「无」。"""
@@ -407,26 +430,32 @@ class TestExportBase:
         return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
 
     def test_sign_images_inserted(self, sample_data):
-        """手写签字导出为图片：AR=inspector_sign、AU=co_inspector_sign，格内不写文本。"""
+        """手写签字导出为图片：6 个签字位 AS/AV~AZ（验收人员列插入后右移），
+        格内不写文本；AR 验收人员文本列写录入值。"""
         pid = sample_data["pid"]
         url = self._sign_data_url()
         storage.upsert_survey_row(pid, "table1", sample_data["sc2"], {
+            "inspector": "张三",
             "inspector_sign": url, "co_inspector_sign": url,
+            "co_inspector_sign2": url, "co_inspector_sign3": url,
+            "co_inspector_sign4": url, "co_inspector_sign5": url,
         }, "张三")
         output, _ = exporter.export_base(pid)
         wb = openpyxl.load_workbook(output)
         ws = wb["2023年度人工造林"]
-        # 行5（小班3）两列签字 → 2 张图片
-        assert len(ws._images) == 2
+        # 行5（小班3）6 列签字 → 6 张图片（AS/AV/AW/AX/AY/AZ）
+        assert len(ws._images) == 6
         cells = sorted((img.anchor._from.row + 1, img.anchor._from.col + 1)
                        for img in ws._images)
-        assert cells == [(5, 44), (5, 47)]   # AR5 / AU5
+        assert cells == [(5, 45), (5, 48), (5, 49),
+                         (5, 50), (5, 51), (5, 52)]
         # 固定显示范围：宽 ≤200px、高 ≤64px
         for img in ws._images:
             assert img.width <= 200 and img.height <= 64
-        # 单元格本身不写 data URL 文本
-        assert ws.cell(row=5, column=44).value in (None, "")
-        assert ws.cell(row=5, column=47).value in (None, "")
+        # AR 验收人员文本列写录入值；签字格本身不写 data URL 文本
+        assert ws.cell(row=5, column=44).value == "张三"   # AR 验收人员
+        for col in (45, 48, 49, 50, 51, 52):
+            assert ws.cell(row=5, column=col).value in (None, "")
 
     def test_sign_blank_skipped(self, sample_data):
         """无签字 → 不插图片、单元格留空。"""
@@ -575,29 +604,152 @@ class TestExportSamples:
             exporter.export_samples(sample_data["pid"], category="封山育林")
 
     def test_samples_zip_per_subcompartment(self, sample_data):
-        """分类下载样地 zip：每小班一个 xlsx，命名 {林班-小班}号调查小班-{分类}-{年度}.xlsx。"""
+        """分类下载样地 zip：仅含有效样地的小班出文件；
+        文件名 {调查小班号}号调查小班-{分类}-{年度}.xlsx（无林班前缀，2026-08-25）。"""
         import zipfile
-        from datetime import date
         buf, stats = exporter.export_samples_zip(sample_data["pid"], category="人工造林")
-        assert stats["files"] == 2
+        # sc1（小班5，2 个有效样地）出文件；sc2（小班3，无录入记录）跳过
+        assert stats["files"] == 1
         with zipfile.ZipFile(buf) as zf:
             names = sorted(zf.namelist())
-        # sc1：林班1小班5 计划年度2023；sc2：林班1小班3 无年度→项目名无年度→当前年
-        assert names == [
-            "1-3号调查小班-人工造林-%d.xlsx" % date.today().year,
-            "1-5号调查小班-人工造林-2023.xlsx",
-        ]
+        assert names == ["5号调查小班-人工造林-2023.xlsx"]
         # 每个 xlsx 可打开且为单小班模式（一个 sheet 一个块）
         with zipfile.ZipFile(buf) as zf:
             wb = openpyxl.load_workbook(io.BytesIO(
-                zf.read("1-5号调查小班-人工造林-2023.xlsx")))
+                zf.read("5号调查小班-人工造林-2023.xlsx")))
         assert wb.sheetnames == ["人工造林-5"]
         assert wb["人工造林-5"].cell(row=4, column=3).value == 100  # 样地1 面积
+
+    def test_invalid_sample_rows_filtered(self, sample_data):
+        """无效样地行（缺面积/种植株数）不写入块，B27 回退计数只算有效样地。"""
+        pid = sample_data["pid"]
+        sc1 = sample_data["sc1"]
+        rec = storage.get_survey_rows(pid, "table1")
+        d = next(r["data"] for r in rec if r["subcompartment_id"] == sc1)
+        d["samples"] = [
+            {"no": 1, "area": 100, "planted": 100, "alive": 90},
+            {"no": 2, "area": 100, "planted": "", "alive": 50},   # 缺种植株数 → 过滤
+            {"no": 3, "planted": 80, "alive": 40},                # 缺面积 → 过滤
+        ]
+        storage.upsert_survey_row(pid, "table1", sc1, d, "张三")
+        output, _ = exporter.export_samples(pid, subcompartment_id=sc1)
+        wb = openpyxl.load_workbook(output)
+        ws = wb["人工造林-5"]
+        # 行4 仅样地1；行5（样地2 位置）为空
+        assert ws.cell(row=4, column=1).value == 1
+        assert ws.cell(row=4, column=3).value == 100
+        assert ws.cell(row=5, column=1).value in (None, "")
+        # B27 回退计数 = 有效样地数 1
+        assert ws.cell(row=27, column=2).value == 1
 
     def test_samples_zip_empty_category_raises(self, sample_data):
         """样地 zip：该分类无小班时 ValueError（端点转 404）。"""
         with pytest.raises(ValueError, match="暂无小班数据"):
             exporter.export_samples_zip(sample_data["pid"], category="封山育林")
+
+    def test_samples_singlefile(self, sample_data):
+        """单文件版本（2026-08-25）：一个 xlsx 每有效样地小班一个 sheet
+        「分类-调查小班号」；无有效样地小班不出 sheet；分类过滤生效。"""
+        output, stats = exporter.export_samples_singlefile(sample_data["pid"])
+        wb = openpyxl.load_workbook(output)
+        # 仅 sc1（小班5）有有效样地；sc2 无录入记录
+        assert wb.sheetnames == ["人工造林-5"]
+        assert stats["sheets"] == {"人工造林-5": 1}
+        ws = wb["人工造林-5"]
+        assert ws.cell(row=4, column=3).value == 100  # 样地1 面积
+        # 分类过滤：封山育林无有效样地 → ValueError
+        with pytest.raises(ValueError, match="暂无样地数据"):
+            exporter.export_samples_singlefile(sample_data["pid"], category="封山育林")
+
+
+class TestInspectDateFilter:
+    """验收日期过滤（2026-08-26 D28）：按记录 inspect_time 单日过滤，
+    base/样地 zip/样地单文件三处同口径。"""
+
+    @pytest.fixture()
+    def dated(self, sample_data):
+        """给 sc1 的记录加验收时间 2026-08-20（sc2 无记录）。"""
+        pid = sample_data["pid"]
+        rec = storage.get_survey_rows(pid, "table1")[0]
+        d = dict(rec["data"])
+        d["inspect_time"] = "2026-08-20"
+        storage.upsert_survey_row(pid, "table1", sample_data["sc1"], d, "张三")
+        return sample_data
+
+    def test_base_filtered(self, dated):
+        """基本信息：匹配日期仅导出该小班；不匹配日期无数据报错。"""
+        pid = dated["pid"]
+        out, stats = exporter.export_base(pid, inspect_date="2026-08-20")
+        assert stats["sheets"]["人工造林"] == 1
+        with pytest.raises(ValueError, match="无录入数据"):
+            exporter.export_base(pid, inspect_date="2026-08-19")
+
+    def test_base_unfiltered_unchanged(self, dated):
+        """不传日期保持原行为：全部小班（含未录入）。"""
+        _out, stats = exporter.export_base(dated["pid"])
+        assert stats["sheets"]["人工造林"] == 2
+
+    def test_samples_zip_filtered(self, dated):
+        pid = dated["pid"]
+        buf, st = exporter.export_samples_zip(pid, inspect_date="2026-08-20")
+        assert st["files"] == 1
+        with pytest.raises(ValueError, match="无样地数据"):
+            exporter.export_samples_zip(pid, inspect_date="2026-08-19")
+
+    def test_samples_singlefile_filtered(self, dated):
+        out, stats = exporter.export_samples_singlefile(
+            dated["pid"], inspect_date="2026-08-20")
+        assert list(stats["sheets"]) == ["人工造林-5"]
+
+    def test_cache_bypass_when_filtered(self, dated):
+        """过滤导出绕过缓存（不落盘），全量导出不受影响仍走缓存。"""
+        from survey.core import export_cache
+        pid = dated["pid"]
+        out, st = export_cache.cached_or_generate(pid, "人工造林", "samples",
+                                                  inspect_date="2026-08-20")
+        assert isinstance(out, io.BytesIO) and st["files"] == 1
+        # 未生成缓存文件（绕过）
+        assert export_cache.load_cached(pid, "人工造林", "samples") is None
+
+    def test_base_county_filter(self, sample_data):
+        """县过滤（2026-08-26 D30）：按小班 GDB「县」字段匹配；不匹配报错。"""
+        pid = sample_data["pid"]
+        # fixture 小班 data_json「县」默认值
+        row = storage.get_subcompartment_row(sample_data["sc1"])
+        county = (row.get("data") or {}).get("县")
+        assert county  # fixture 必须含县字段
+        _out, stats = exporter.export_base(pid, county=county)
+        assert stats["sheets"]["人工造林"] == 2  # 两小班同县
+        with pytest.raises(ValueError, match="无录入数据"):
+            exporter.export_base(pid, county="不存在县")
+
+    def test_base_county_and_date_combined(self, dated):
+        """县 + 验收日期叠加过滤：sc1 有记录（日期匹配），sc2 无记录。"""
+        pid = dated["pid"]
+        county = (storage.get_subcompartment_row(dated["sc1"]).get("data") or {}).get("县")
+        _out, stats = exporter.export_base(pid, county=county,
+                                           inspect_date="2026-08-20")
+        assert stats["sheets"]["人工造林"] == 1
+        # 日期不匹配 + 县匹配 → 无数据
+        with pytest.raises(ValueError, match="无录入数据"):
+            exporter.export_base(pid, county=county, inspect_date="2026-08-19")
+
+
+def _read_shp_from_zip(buf):
+    """解包轨迹 zip 并用 geopandas 读回全部 shapefile（2026-08-25 起每小班
+    一个独立 .shp，目录隔离 {调查小班号}号调查小班-{分类}-{年度}/），合并返回。"""
+    import geopandas as gpd
+    import os
+    import tempfile
+    import zipfile
+    with zipfile.ZipFile(buf) as zf:
+        names = zf.namelist()
+        with tempfile.TemporaryDirectory() as td:
+            for n in names:
+                zf.extract(n, td)
+            shps = sorted(n for n in names if n.endswith(".shp"))
+            gdfs = [gpd.read_file(os.path.join(td, s)) for s in shps]
+            return gpd.pd.concat(gdfs, ignore_index=True) if len(gdfs) > 1 else gdfs[0]
 
 
 class TestExportTracks:
@@ -607,67 +759,41 @@ class TestExportTracks:
             exporter.export_tracks_zip(sample_data["pid"])
 
     def test_category_filter(self, sample_data):
-        """分类过滤：仅打包该分类小班的轨迹 GPX（新命名：小班号-分类-年度.gpx）。"""
-        import zipfile
-        from datetime import date
+        """分类过滤：仅导出该分类小班的轨迹（单 shapefile，geopandas 读回验证）。"""
         pid = sample_data["pid"]
         sc3 = _insert_sc_row(pid, {
             "乡镇": "测试乡", "村": "测试村", "林班": 2, "小班": 7, "调查小班号": 7,
         }, forest_compartment=2, subcompartment=7, category="封山育林", row_index=2)
-        storage.save_track(sample_data["sc1"], [
-            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
-        ])
-        storage.save_track(sc3, [
-            {"lng": 102.3, "lat": 25.7, "t": "2026-08-21T11:00:00"},
-        ])
-        buf, stats = exporter.export_tracks_zip(pid, category="封山育林")
-        with zipfile.ZipFile(buf) as zf:
-            names = zf.namelist()
-        # sc3：林班2小班7，无计划年度，项目名无年度 → 当前年
-        assert names == [f"tracks/2-7号调查小班-封山育林-{date.today().year}.gpx"]
-        # 不过滤则两类各一条：sc1 计划年度 2023
-        buf_all, stats_all = exporter.export_tracks_zip(pid)
-        with zipfile.ZipFile(buf_all) as zf:
-            assert sorted(zf.namelist()) == [
-                "tracks/1-5号调查小班-人工造林-2023.gpx",
-                f"tracks/2-7号调查小班-封山育林-{date.today().year}.gpx",
-            ]
-        # 过滤无轨迹分类 → ValueError
-        sc4 = _insert_sc_row(pid, {
-            "乡镇": "测试乡", "村": "测试村", "林班": 3, "小班": 9, "调查小班号": 9,
-        }, forest_compartment=3, subcompartment=9, category="退化林修复", row_index=3)
-        with pytest.raises(ValueError, match="暂无轨迹"):
-            exporter.export_tracks_zip(pid, category="退化林修复")
-
-    def test_kml_single_file(self, sample_data):
-        """KML：全部小班合并单文件，每小班一个 Placemark（LineString）。"""
-        import zipfile
-        from datetime import date
-        pid = sample_data["pid"]
-        sc3 = _insert_sc_row(pid, {
-            "乡镇": "测试乡", "村": "测试村", "林班": 2, "小班": 7, "调查小班号": 7,
-        }, forest_compartment=2, subcompartment=7, category="封山育林", row_index=2)
-        # sc1 两点成线；sc3 单点 → KML 跳过
         storage.save_track(sample_data["sc1"], [
             {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
             {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
         ])
         storage.save_track(sc3, [
             {"lng": 102.3, "lat": 25.7, "t": "2026-08-21T11:00:00"},
+            {"lng": 102.31, "lat": 25.71, "t": "2026-08-21T11:01:00"},
         ])
-        buf, stats = exporter.export_tracks_zip(pid, fmt="kml")
-        assert stats["fmt"] == "kml" and stats["tracks"] == 1
-        with zipfile.ZipFile(buf) as zf:
-            assert zf.namelist() == ["tracks/测试项目.kml"]  # 项目名主干
-            kml = zf.read("tracks/测试项目.kml").decode("utf-8")
-        assert kml.startswith('<?xml version="1.0" encoding="UTF-8"?>')
-        assert '<kml xmlns="http://www.opengis.net/kml/2.2">' in kml
-        assert kml.count("<Placemark>") == 1          # 单点轨迹跳过
-        assert "102.1,25.6 102.11,25.61" in kml       # 坐标串
-        assert "分类: 人工造林" in kml and "点数: 2" in kml
+        # 过滤封山育林 → 仅 sc3 一条要素
+        buf, stats = exporter.export_tracks_zip(pid, category="封山育林")
+        assert stats["fmt"] == "shp" and stats["tracks"] == 1
+        gdf = _read_shp_from_zip(buf)
+        assert list(gdf["name"]) == ["2-7"]
+        assert list(gdf["category"]) == ["封山育林"]
+        # 不过滤 → 两类各一条
+        buf_all, stats_all = exporter.export_tracks_zip(pid)
+        assert stats_all["tracks"] == 2
+        gdf_all = _read_shp_from_zip(buf_all)
+        assert sorted(gdf_all["name"]) == ["1-5", "2-7"]
+        assert sorted(gdf_all["category"]) == ["人工造林", "封山育林"]
+        # 过滤无轨迹分类 → ValueError
+        _insert_sc_row(pid, {
+            "乡镇": "测试乡", "村": "测试村", "林班": 3, "小班": 9, "调查小班号": 9,
+        }, forest_compartment=3, subcompartment=9, category="退化林修复", row_index=3)
+        with pytest.raises(ValueError, match="暂无轨迹"):
+            exporter.export_tracks_zip(pid, category="退化林修复")
 
-    def test_shp_single_file(self, sample_data):
-        """SHP：单 shapefile（每小班一条线要素 + 属性表），geopandas 读回验证。"""
+    def test_shp_per_subcompartment(self, sample_data):
+        """SHP 按小班分文件（2026-08-25 R17）：每小班独立 shapefile 目录隔离，
+        geopandas 读回验证内容与组件齐全。"""
         import zipfile
         pid = sample_data["pid"]
         storage.save_track(sample_data["sc1"], [
@@ -675,21 +801,17 @@ class TestExportTracks:
             {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
             {"lng": 102.12, "lat": 25.62, "t": "2026-08-21T10:02:00"},
         ])
-        buf, stats = exporter.export_tracks_zip(pid, fmt="shp")
-        assert stats["fmt"] == "shp" and stats["tracks"] == 1
-        import geopandas as gpd
-        import tempfile, os
+        buf, stats = exporter.export_tracks_zip(pid)
+        assert stats["fmt"] == "shp" and stats["tracks"] == 1 and stats["files"] == 1
         with zipfile.ZipFile(buf) as zf:
             names = zf.namelist()
+            # 目录隔离：{调查小班号}号调查小班-{分类}-{年度}/ 前缀
+            prefix = "5号调查小班-人工造林-2023/"
+            assert any(n.startswith(prefix) and n.endswith(".shp") for n in names)
             # shapefile 组件齐全（.shp/.shx/.dbf/.prj/.cpg）
-            assert any(n.endswith(".shp") for n in names)
-            assert any(n.endswith(".dbf") for n in names)
-            assert any(n.endswith(".prj") for n in names)
-            with tempfile.TemporaryDirectory() as td:
-                for n in names:
-                    zf.extract(n, td)
-                stem = next(n for n in names if n.endswith(".shp"))
-                gdf = gpd.read_file(os.path.join(td, stem))
+            for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                assert any(n.startswith(prefix) and n.endswith(ext) for n in names), ext
+        gdf = _read_shp_from_zip(buf)
         assert len(gdf) == 1
         row = gdf.iloc[0]
         assert row.geometry.geom_type == "LineString"
@@ -700,18 +822,130 @@ class TestExportTracks:
         assert str(row["start"]).startswith("2026-08-21")
         assert gdf.crs is not None and gdf.crs.to_epsg() == 4326  # WGS84
 
-    def test_fmt_invalid_raises(self, sample_data):
-        """非法 fmt → ValueError。"""
-        with pytest.raises(ValueError, match="不支持的轨迹格式"):
-            exporter.export_tracks_zip(sample_data["pid"], fmt="dwg")
+    def test_buf_position_at_start(self, sample_data):
+        """回归：返回的 BytesIO 必须在位置 0（2026-08-24 生产空下载事故）。
 
-    def test_kml_all_single_point_raises(self, sample_data):
+        ZipFile.close() 写完中央目录后指针停在 EOF；seek(0) 若写在 with
+        块内会被 close 推回末尾 → send_file 从当前位置读出 0 字节
+        （200 + Content-Length 正确但空 body）。测试里用 ZipFile 打开
+        不受指针影响，唯本断言能兜住。
+        """
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+            {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
+        ])
+        buf, _stats = exporter.export_tracks_zip(sample_data["pid"])
+        assert buf.tell() == 0
+        data = buf.read()  # 模拟 send_file：从当前位置读到尾
+        assert data[:4] == b"PK\x03\x04" and len(data) > 100
+
+    def test_dedupe_consecutive_points(self, sample_data):
+        """连续重复点位去重：GPS 精度受限常回传相同坐标（生产数据实测）。"""
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:05"},   # 重复
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:10"},   # 重复
+            {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
+            {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:05"},  # 重复
+        ])
+        buf, stats = exporter.export_tracks_zip(sample_data["pid"])
+        gdf = _read_shp_from_zip(buf)
+        assert stats["total_points"] == 2
+        assert gdf.iloc[0]["pts"] == 2
+        assert len(gdf.iloc[0].geometry.coords) == 2
+
+    def test_all_single_point_raises(self, sample_data):
         """全部轨迹不足 2 点 → ValueError（线要素无法生成）。"""
         storage.save_track(sample_data["sc1"], [
             {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
         ])
         with pytest.raises(ValueError, match="不足 2 个有效点"):
-            exporter.export_tracks_zip(sample_data["pid"], fmt="kml")
-        # GPX 不受单点限制
-        buf, stats = exporter.export_tracks_zip(sample_data["pid"], fmt="gpx")
-        assert stats["tracks"] == 1
+            exporter.export_tracks_zip(sample_data["pid"])
+
+
+class TestExportCache:
+    """导出缓存层（2026-08-25 D25）：指纹失效 / 命中复用 / 项目级合并 / prefetch。"""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_cache(self):
+        import shutil
+        from survey.core import export_cache
+        yield
+        shutil.rmtree(export_cache.cache_root(), ignore_errors=True)
+
+    def test_cache_hit_and_invalidate(self, sample_data):
+        """未命中生成并回写；命中复用（文件不变）；数据变更后指纹失效重生成。"""
+        from survey.core import export_cache
+        pid = sample_data["pid"]
+        path1, stats1 = export_cache.cached_or_generate(pid, "人工造林", "samples")
+        assert path1.exists() and stats1["files"] == 1
+        mtime1 = path1.stat().st_mtime_ns
+        # 二次：命中 → 同一磁盘文件，未重生成
+        path2, stats2 = export_cache.cached_or_generate(pid, "人工造林", "samples")
+        assert path2 == path1
+        assert path2.stat().st_mtime_ns == mtime1
+        assert stats2 == stats1
+        # 数据变更（records.updated_at 变）→ 指纹失效 → 重写缓存
+        rec = storage.get_survey_rows(pid, "table1")[0]
+        d = dict(rec["data"])
+        d["remark"] = "改一下触发指纹变化"
+        storage.upsert_survey_row(pid, "table1", sample_data["sc1"], d, "张三")
+        assert export_cache.load_cached(pid, "人工造林", "samples") is None
+        path3, _ = export_cache.cached_or_generate(pid, "人工造林", "samples")
+        assert path3.stat().st_mtime_ns != mtime1
+
+    def test_track_fingerprint_follows_extras(self, sample_data):
+        """轨迹保存（extras.updated_at 变）也使指纹失效。"""
+        from survey.core import export_cache
+        pid = sample_data["pid"]
+        export_cache.cached_or_generate(pid, "人工造林", "samples")
+        fp1 = export_cache.fingerprint(pid, "人工造林")
+        storage.save_track(sample_data["sc1"], [
+            {"lng": 102.1, "lat": 25.6, "t": "2026-08-21T10:00:00"},
+            {"lng": 102.11, "lat": 25.61, "t": "2026-08-21T10:01:00"},
+        ])
+        assert export_cache.fingerprint(pid, "人工造林") != fp1
+
+    def test_project_merge_zip(self, sample_data):
+        """项目级合并 zip：各分类缓存文件拼进一个 zip（BytesIO 位置 0）。"""
+        import zipfile
+        from survey.core import export_cache
+        buf = export_cache.cached_or_generate_project(sample_data["pid"], "samples")
+        assert buf.tell() == 0
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+        assert names == ["5号调查小班-人工造林-2023.xlsx"]
+
+    def test_project_merge_all_empty_raises(self, sample_project):
+        """项目级合并：全部分类无数据 → ValueError。"""
+        from survey.core import export_cache
+        with pytest.raises(ValueError, match="暂无样地数据"):
+            export_cache.cached_or_generate_project(sample_project["id"], "samples")
+
+    def test_prefetch_quiet_and_generate(self, sample_data, monkeypatch):
+        """prefetch：数据刚更新（静默窗口内）跳过；窗口外生成；再跑命中跳过。"""
+        from survey.core import export_cache
+        pid = sample_data["pid"]
+        proj = storage.get_project(pid)
+        monkeypatch.setattr(export_cache.storage, "list_projects", lambda: [proj])
+        # 静默窗口内（fixture 刚写 records）→ 跳过不生成
+        s = export_cache.prefetch(quiet_minutes=10)
+        assert s["skipped_quiet"] >= 1 and not s["generated"]
+        assert export_cache.load_cached(pid, "人工造林", "samples") is None
+        # 窗口设 0（视为数据已静默）→ 生成；无轨迹的轨迹缓存走 emptied
+        s2 = export_cache.prefetch(quiet_minutes=0)
+        assert s2["generated"] >= 1
+        hit = export_cache.load_cached(pid, "人工造林", "samples")
+        assert hit is not None
+        # 再跑 → 指纹一致跳过（tracks 无数据仍走 emptied，不算 generated）
+        s3 = export_cache.prefetch(quiet_minutes=0)
+        assert s3["skipped_fresh"] >= 1 and not s3["generated"]
+
+    def test_cleanup_project(self, sample_data):
+        """项目删除 → 缓存目录清理。"""
+        from survey.core import export_cache
+        pid = sample_data["pid"]
+        export_cache.cached_or_generate(pid, "人工造林", "samples")
+        assert export_cache.load_cached(pid, "人工造林", "samples") is not None
+        export_cache.cleanup_project(pid)
+        assert export_cache.load_cached(pid, "人工造林", "samples") is None

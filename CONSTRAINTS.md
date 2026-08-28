@@ -66,6 +66,9 @@
 - D17 网格工具栏小班 select 前有调查小班号搜索框（#gridScSearch，仅正整数触发）：在当前筛选结果内按 r.subcompartment 精确匹配，命中则设 select 值并派发 change（复用手动选中完整流程：停轨迹/载数据/刷工具栏/渲染网格）；无匹配 toast 提示不动选择
 - D18 管理后台「分类下载」（项目管理 tab 展开行，2026-08-21，当日二次改版）：每分类三个下载，按钮顺序 基本信息→样地打包→轨迹打包——基本信息不打包直接下载 xlsx（export_base(category=)，仅该分类 sheet）；样地为 zip 且每小班一个 xlsx（export_samples_zip：单小班模式逐班导出再打包，784 小班约 26s）；轨迹为 zip（export_tracks_zip(category=)，单 shapefile，见 D4）。下载文件名 {分类}-{年度}-基本信息.xlsx / {分类}-{年度}-样地.zip / {分类}-{年度}-轨迹.zip（年度=项目名「(2023 年度)」→当前年，admin._dl_year）；样地 zip 内文件名 {林班-小班|小班}号调查小班-{分类}-{年度}.xlsx（exporter._sc_file_base：林班>0 带「林班-」防同号冲突，年度=小班 GDB 计划年度→项目名→当前年，同名追加序号）；轨迹 zip 内为单 shapefile 组件（tracks/ 目录）。分类清单 GET /api/projects/<pid>/categories（懒加载缓存）；不传 cat 时整项目导出不变（实测对比）
 - D19 GDB 文件列表不提供删除入口（2026-08-21 起移除 UI 按钮，防误删）：删除 GDB 只能随项目删除（DELETE /api/projects/<pid> 兜底清理关联 GDB）
+- D21 手写签字列（2026-08-25 起每表 6 个签字位；2026-08-26 模板插入验收人员文本列后右移）：验收人员 + 配合验收人员×5，前端签字卡片键 inspector_sign / co_inspector_sign / co_inspector_sign2~5（PNG data URL 存 data_json，非 schema 字段，PUT 直传）；tpl-base 签字列当前布局 表1 AS/AV/AW/AX/AY/AZ、表2 BJ/BM/BN/BO/BP/BQ、表3 AW/AZ/BA/BB/BC/BD，导出裁白边缩放后以图片插入（<8px 空白守卫跳过）；打卡/轨迹/照片列：表1 BA/BB/BC/BD、表2 BR/BS/BT/BU、表3 BE/BF/BG/BH
+- D29 base 验收人员文本列（2026-08-26 模板新增）：表1 AR/表2 BI/表3 AV = inspector（data_json，打卡自动填登录人昵称 D24）；签字/时间/备注/打卡等列整体右移 1 列
+- D30 导出县过滤（2026-08-26）：仅基本信息导出支持 ?county=（小班 GDB data_json「县」精确匹配，如 华宁县/澄江市；生产两市县），空分类移除 sheet、全空 ValueError；可与验收日期叠加（文件名 _{县}_验收{日期}）；样地/轨迹不参与县过滤（用户口径：县选项对样地不起作用）；admin /api/projects/<pid>/counties 供下拉（去重排序，GDB+批次两来源）；前端弹窗县 select 仅 base 按钮渲染（fetch 失败静默降级隐藏），默认「全部」；admin.js v=20260826c
 
 ## E 样地
 
@@ -109,6 +112,11 @@
 - H7 gdb.py 图层分类前缀：人工造林/封山育林/退化林修复（水利水保/草原已彻底删除）
 - H8 project_name_exists_global 以 projects 表为真相源查重；delete_project 按项目名兜底清理孤儿小班行
 - H9 认证 session cookie 必须全站唯一一条（Path=/）：survey/survey-admin 的 create_app 显式 SESSION_COOKIE_PATH='/' + SESSION_REFRESH_EACH_REQUEST=False（Flask 默认会用 APPLICATION_ROOT 即 /survey、/survey-admin 写出第二条同名 cookie，登出不清理且"最长路径优先"发送遮蔽新登录 → 换账号后 api/me 仍返回前一个用户，2026-08-24 修复 7082570）；两端 after_request 持续下发前缀 cookie 删除指令清历史遗留；forest-data 登录/登出同时 delete_cookie 前缀路径
+- H10 导出预生成 systemd timer（2026-08-25）：~/.config/systemd/user/hqz-export-prefetch.{service,timer}，每 10 分钟 `cd /home/www/bibook_deploy/apps/survey && /home/www/shared_venv/bin/python3 -m survey.core.export_cache`（prefetch：指纹一致跳过；数据 10 分钟内有更新跳过；无数据清缓存）。缓存目录 {项目根}/data/export_cache/（gitignore，rsync 不带 --delete 不受部署影响）；服务器手动重装：写两个 unit 文件 + systemctl --user daemon-reload && enable --now hqz-export-prefetch.timer
+- D25 导出缓存层（2026-08-25，survey/core/export_cache.py）：admin 样地/轨迹 zip 下载走 cached_or_generate——缓存粒度 (pid, 分类, kind)；数据指纹=SHA1(records 条数|max updated_at|Σversion|extras 条数|max updated_at|小班行数)（Σversion 兜住同秒内连写）；命中 send_file 磁盘文件，未命中同步生成并回写（.tmp+os.replace 原子写，先 zip 后 manifest）；项目删除清理缓存目录。项目级下载=各分类缓存 zip 纯 zip I/O 合并不再缓存
+- D26 项目级样地导出改 zip（2026-08-25）：admin 项目行「样地」按钮由单 xlsx（每分类一个 sheet 块结构）改为 {项目名}_样地.zip（每小班一个 xlsx，与分类下载同构）
+- D27 样地单文件导出（2026-08-26）：exporter.export_samples_singlefile——一个 xlsx 每有有效样地的小班一个 sheet「分类-调查小班号」（数字，无林班前缀，与单小班模式同口径）；admin 端点 ?single=1（?cat 同步过滤）；文件名前缀项目名：{项目名}_样地.xlsx / {项目名}_{分类}_样地.xlsx；项目行「样地打包/样地单文件」两按钮 + 分类下载行「样地单文件」；不接 export_cache（单次 openpyxl 生成够快）
+- D28 导出验收日期过滤（2026-08-26）：?inspect_date=YYYY-MM-DD 单日（无区间），按记录 data_json.inspect_time 前 10 位精确匹配；export_base/样地 zip/样地单文件三处同口径（样地与基本信息同源于同一 record，一致性优先）；过滤时 base 空分类移除 sheet、全空 ValueError「验收日期 X 无录入数据」；样地 zip/单文件沿用有效样地口径叠加日期过滤；文件名追加 _验收{日期}；过滤导出绕过 export_cache 不落盘（cached_or_generate inspect_date 分支）；轨迹不参与过滤（R17 独立）；admin 前端 askExportOptions 日期弹窗（留空=全量，取消不发请求），基本信息/样地打包/样地单文件按钮（项目级+分类级）均走弹窗，轨迹按钮直下；admin.js v=20260826b
 
 ## R 反转记录（已废弃约束，保留溯源）
 
@@ -125,3 +133,8 @@
 - R11 已反转（2026-08-24）：成活率等级三列（O/P/Q 类）原为 percent 手输列（存比率、录入值导出覆盖公式），面积分派列（S/AF/AH/AL 类）原为 number 手输 → 均改为 computed + store:false 派生列（前端实时算不落库，导出一律模板公式现算，见 D20）；反转原因：模板本身带分派公式，手输/落库会产生双真相（录入值与公式结果不一致时无仲裁），且面积分派=IF(合格率≥0.9,上报面积) 口径由公式单一承担；生产库经查无这些 key 的历史录入值，无迁移需求
 - R12 已反转（2026-08-24）：轨迹导出由三格式（GPX 1.1 每小班一文件 / KML 单文件 / SHP 单 shapefile，fmt 参数切换）收窄为仅 SHP 单 shapefile——用户决策「直接保存为 shp，可以追加，其他格式不提供」（SHP 在 GIS 中可 Append 合并）；Excel 轨迹列由「GPX 文件名」改为「SHP name 属性（调查小班号）」；旧 D4（GPX 1.1 按小班打包 ZIP + 轨迹列写 GPX 文件名）作废；GPX/KML 代码路径（_track_gpx/_track_kml/_track_desc/_track_gpx_filename）与 admin 三按钮、fmt 参数全部删除。同日修复生产空下载事故：export_tracks_zip 的 buf.seek(0) 误写在 ZipFile with 块内，close() 把指针推回 EOF，send_file 读出 0 字节（200 + Content-Length 正确）——测试用 ZipFile 打开复现不了，新增 test_buf_position_at_start 断言 buf.tell()==0
 - R15 已反转（2026-08-25）：轨迹采集精度策略由「GPS 优先 + 网络兜底」（GPS >30s 无点转发网络点、acc≤500m、lastGpsTime 启动宽限防偏移首点）收窄为**纯 GPS**（仅注册 GPS_PROVIDER，NETWORK_PROVIDER 注册与门控逻辑全删）——用户决策「完全去掉网络兜底」：网络点纠偏后绝对精度仍 50~1000m（锯齿/偏移首点之源），宁可 GPS 无 fix 期间（冷启动/深林）轨迹空白也不记偏点；GPS 设备缺失时直接 reject NO_PROVIDER（原"网络源仍可用"分支删除）→ 见 F8
+- R16 已反转（2026-08-25）：样地 zip 文件名由「{林班-小班}号调查小班-…」（防跨林班同号冲突）改为「{调查小班号}号调查小班-…」不含林班前缀——用户决策；同号冲突仍由 _2/_3 序号兜底；轨迹 SHP name 属性仍保留林班-小班格式（未反转）
+- R17 已反转（2026-08-25）：轨迹导出由 R12「单 shapefile（每小班一条线要素，Append 合并）」反转为**按小班分文件**——zip 内每小班一个独立 shapefile（目录 {调查小班号}号调查小班-{分类}-{年度}/，shapefile 组件文件同名必须目录隔离；含分类+年度防项目级合并 zip 跨分类目录冲突）；每小班一条 LineString + 属性表口径不变；ArcGIS 逐个打开/追加；SHP name 属性仍为林班-小班
+- D22 样地有效口径（2026-08-25）：样地面积+种植株数均已填才算有效样地（exporter._valid_sample）；无效样地不写入样地导出块、不参与统计（B27 回退计数/Σ种植/Σ成活）、样地 zip 不为无有效样地的小班出文件（三者同口径保证 I3 勾稽）
+- D23 基本信息导出 sheet 名年度动态（2026-08-25）：由模板固定「2023年度{分类}」改为「{年度}年度{分类}」；年度口径=项目名「(N 年度)」正则 → 小班 GDB 计划年度众数 → 当前年（_proj_sheet_year）；此前多年度项目（线上 2022/2023/2024 三项目）导出 sheet 名一律错误显示 2023
+- D24 打卡回填验收人（2026-08-25）：打卡时除坐标/验收时间外，inspector（验收人员）为空则回填当前登录人昵称（api/me display_name）；仅填空值不覆盖，网格单元格同步刷新（app.js fillSampleCoords，v=20260825e）

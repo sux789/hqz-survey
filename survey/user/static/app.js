@@ -1401,7 +1401,17 @@ async function renderSurveyForm() {
   renderSignCards(sc, sv);
 }
 
-// 签字卡片：表格下方两个签字区
+// 签字位定义：验收人员 + 配合验收人员×5（与 tpl-base 签字列一一对应）
+const SIGN_FIELDS = [
+  { key: 'inspector_sign', title: '验收人员签字' },
+  { key: 'co_inspector_sign', title: '配合验收人员签字' },
+  { key: 'co_inspector_sign2', title: '配合验收人员2签字' },
+  { key: 'co_inspector_sign3', title: '配合验收人员3签字' },
+  { key: 'co_inspector_sign4', title: '配合验收人员4签字' },
+  { key: 'co_inspector_sign5', title: '配合验收人员5签字' },
+];
+
+// 签字卡片：表格下方签字区（每签字位一张卡）
 function renderSignCards(sc, sv) {
   const container = qs('#gridContainer');
   if (!container) return;
@@ -1412,22 +1422,16 @@ function renderSignCards(sc, sv) {
     signBar.className = 'sign-bar';
     container.appendChild(signBar);
   }
-  const inspectorSign = sv.inspector_sign || '';
-  const coSign = sv.co_inspector_sign || '';
-  signBar.innerHTML = `
-    <div class="sign-card" data-action="sign-open" data-key="inspector_sign">
-      <div class="sign-title">验收人员签字</div>
-      <div class="sign-area">${inspectorSign
-      ? `<img src="${inspectorSign}" alt="签名">`
+  signBar.innerHTML = SIGN_FIELDS.map(f => {
+    const sign = sv[f.key] || '';
+    return `
+    <div class="sign-card" data-action="sign-open" data-key="${f.key}">
+      <div class="sign-title">${f.title}</div>
+      <div class="sign-area">${sign
+      ? `<img src="${sign}" alt="签名">`
       : '<span class="sign-placeholder">点击签字</span>'}</div>
-    </div>
-    <div class="sign-card" data-action="sign-open" data-key="co_inspector_sign">
-      <div class="sign-title">配合验收人员签字</div>
-      <div class="sign-area">${coSign
-      ? `<img src="${coSign}" alt="签名">`
-      : '<span class="sign-placeholder">点击签字</span>'}</div>
-    </div>
-  `;
+    </div>`;
+  }).join('');
 }
 
 // 签字 modal：全屏 canvas 签字
@@ -1440,7 +1444,7 @@ function openSignModal(key) {
   modal.innerHTML = `
     <div class="sign-modal-box">
       <div class="sign-modal-header">
-        <span class="sign-modal-title">${key === 'inspector_sign' ? '验收人员' : '配合验收人员'}签字</span>
+        <span class="sign-modal-title">${(SIGN_FIELDS.find(f => f.key === key) || {}).title || '签字'}</span>
         <button class="sign-modal-close" data-action="sign-close">×</button>
       </div>
       <canvas id="signCanvas" class="sign-canvas"></canvas>
@@ -2377,7 +2381,8 @@ async function fillSampleCoords(scId, lng, lat) {
     const fields = def.input_columns || [];
     const hasCoord = fields.some(f => f.key === 'sample_coord_x');
     const hasDate = fields.some(f => f.key === 'inspect_time');
-    if (!hasCoord && !hasDate) return;
+    const hasInspector = fields.some(f => f.key === 'inspector');
+    if (!hasCoord && !hasDate && !hasInspector) return;
     // 拉取该表全部记录，合并保存（避免覆盖其它字段）；
     // 携记录 version 走乐观锁，409 冲突时静默重拉重试一次，仍冲突放弃（后台补填，不打扰）
     const doFill = async () => {
@@ -2390,6 +2395,8 @@ async function fillSampleCoords(scId, lng, lat) {
       }
       let changed = false;
       let coordFilled = false;
+      let timeFilled = false;
+      let inspectorFilled = false;
       // 样地坐标：为空才填（不覆盖手工精测值）
       if (hasCoord) {
         if (existing.sample_coord_x == null || existing.sample_coord_x === '') {
@@ -2404,13 +2411,17 @@ async function fillSampleCoords(scId, lng, lat) {
         const d = new Date();
         const pad = n => String(n).padStart(2, '0');
         existing.inspect_time = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-        changed = true;
+        changed = true; timeFilled = true;
+      }
+      // 验收人：为空则填当前登录人昵称（api/me display_name，2026-08-25）
+      if (hasInspector && (existing.inspector == null || existing.inspector === '') && state.user) {
+        existing.inspector = state.user;
+        changed = true; inspectorFilled = true;
       }
       if (!changed) return { skipped: true };
-      if (!existing.inspector) existing.inspector = state.user || '';
       const bv = rec ? (rec.version != null ? rec.version : 1) : 0;
       const r = await putSurveyRow(tid, scId, existing, state.user || '', bv);
-      return { r, existing, coordFilled };
+      return { r, existing, coordFilled, timeFilled, inspectorFilled };
     };
     let res = await doFill();
     if (res.skipped) return;
@@ -2419,19 +2430,24 @@ async function fillSampleCoords(scId, lng, lat) {
       res = await doFill();
       if (res.skipped || !res.r || !res.r.ok) return;
     }
-    const { existing, coordFilled } = res;
+    const { existing, coordFilled, timeFilled, inspectorFilled } = res;
     // 同步缓存 + 刷新网格显示（当前表匹配且正显示该小班时）
     if (tid === state.gridTable) {
       state._gridSurveyMap[scId] = existing;
       markGridRowSaved(scId, res.r.rec, existing);
       (state._gridRowFields || []).forEach((f, idx) => {
-        if ((f.key === 'sample_coord_x' || f.key === 'sample_coord_y' || f.key === 'inspect_time') && state._grid) {
+        if ((f.key === 'sample_coord_x' || f.key === 'sample_coord_y'
+             || f.key === 'inspect_time' || f.key === 'inspector') && state._grid) {
           state._grid.setValueFromCoords(1, idx, String(existing[f.key]));
         }
       });
       refreshGridToolbar();  // 打卡状态筛选下拉选项随坐标更新
     }
-    toast(coordFilled ? '样地坐标、验收时间已填入' : '验收时间已填入', 1500);
+    const parts = [];
+    if (coordFilled) parts.push('样地坐标');
+    if (timeFilled) parts.push('验收时间');
+    if (inspectorFilled) parts.push('验收人');
+    if (parts.length) toast(parts.join('、') + '已填入', 1500);
   } catch (e) {
     // 填写失败不影响打卡本身
   }

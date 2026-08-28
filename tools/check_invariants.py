@@ -57,10 +57,23 @@ class Ctx:
                 if ws.cell(row=r, column=2).value not in (None, "")]
 
 
+def _base_sheet(wb, cat):
+    """基本信息导出中分类 cat 的 sheet（名动态年度：{N}年度{cat}，2026-08-25）。"""
+    suffix = f"年度{cat}"
+    for sn in wb.sheetnames:
+        if sn.endswith(suffix):
+            return sn
+    return None
+
+
 def i1_row_count(ctx):
     """I1 每分类 sheet 数据行数 == DB 该分类小班数"""
     problems = []
-    for cat, sheet in exporter._TPL_SHEET_NAMES.items():
+    for cat in exporter._TPL_SHEET_NAMES:
+        sheet = _base_sheet(ctx.base_wb, cat)
+        if not sheet:
+            problems.append(f"[{cat}] 基本信息缺少 sheet（年度{cat}）")
+            continue
         ws = ctx.base_wb[sheet]
         got = len(ctx.data_rows(ws))
         want = len(storage.list_project_subcompartment_rows(ctx.pid, category=cat))
@@ -76,7 +89,10 @@ def i2_sort_order(ctx):
     小班原始值——所以以 DB 侧排序结果为期望，比对小班号序列。
     """
     problems = []
-    for cat, sheet in exporter._TPL_SHEET_NAMES.items():
+    for cat in exporter._TPL_SHEET_NAMES:
+        sheet = _base_sheet(ctx.base_wb, cat)
+        if not sheet:
+            continue
         rows = storage.list_project_subcompartment_rows(ctx.pid, category=cat)
         want = [exporter._num(r.get("subcompartment"))
                 for r in sorted(rows, key=exporter._sc_sort_key)]
@@ -92,7 +108,10 @@ def i2_sort_order(ctx):
 def i3_sample_stats(ctx):
     """I3 表1 AN=调查总株数（B34口径）、AP=Σ成活÷Σ种植 比率0-1 ±0.0001（有样地的小班）"""
     problems = []
-    ws = ctx.base_wb[exporter._TPL_SHEET_NAMES["人工造林"]]
+    sheet = _base_sheet(ctx.base_wb, "人工造林")
+    if not sheet:
+        return ["基本信息缺少 sheet（年度人工造林）"]
+    ws = ctx.base_wb[sheet]
     # DB 侧聚合：table1（人工造林）每小班 data（samples 存于各分类自身表 data_json，
     # 旧 table5 已随水利水保/草原下线删除——此前查 table5 恒空致 I3 假通过）
     db_stats = {}
@@ -146,8 +165,12 @@ def i5_block_count(ctx):
 def i6_rate_is_number(ctx):
     """I6 合格率列写数值（int/float），非百分比字符串"""
     problems = []
-    # 合格率列：表1 AP(42) / 表2 BG(59) / 表3 AT(46)（见 exporter._TPL_COL_MAPS）
-    for sheet, col in (("2023年度人工造林", 42), ("2023年度封山育林", 59), ("2023年度退化林", 46)):
+    # 合格率列：表1 AP(42) / 表2 BG(59) / 表3 AT(46)（见 exporter._TPL_COL_MAPS）；
+    # sheet 名年度动态（2026-08-25），按分类后缀查找
+    for cat, col in (("人工造林", 42), ("封山育林", 59), ("退化林修复", 46)):
+        sheet = _base_sheet(ctx.base_wb, cat)
+        if not sheet:
+            continue
         ws = ctx.base_wb[sheet]
         for r in ctx.data_rows(ws):
             v = ws.cell(row=r, column=col).value

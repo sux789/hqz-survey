@@ -476,10 +476,9 @@ function renderProjectsTable() {
       <td class="admin-actions-cell">
         <button class="btn-admin-action" data-action="proj-view-members" data-pid="${p.id}">成员</button>
         <button class="btn-admin-action" data-action="proj-export-base" data-pid="${p.id}">基本信息</button>
-        <button class="btn-admin-action" data-action="proj-export-samples" data-pid="${p.id}">样地</button>
-        <button class="btn-admin-action" data-action="proj-export-tracks" data-fmt="gpx" data-pid="${p.id}">轨迹GPX</button>
-        <button class="btn-admin-action" data-action="proj-export-tracks" data-fmt="kml" data-pid="${p.id}">轨迹KML</button>
-        <button class="btn-admin-action" data-action="proj-export-tracks" data-fmt="shp" data-pid="${p.id}">轨迹SHP</button>
+        <button class="btn-admin-action" data-action="proj-export-samples" data-pid="${p.id}">样地打包</button>
+        <button class="btn-admin-action" data-action="proj-export-samples-single" data-pid="${p.id}">样地单文件</button>
+        <button class="btn-admin-action" data-action="proj-export-tracks" data-pid="${p.id}">轨迹SHP</button>
         <button class="btn-admin-action" data-action="proj-cat-download" data-pid="${p.id}">${catLabel}</button>
         <button class="btn-admin-action warn" data-action="proj-delete" data-pid="${p.id}" data-name="${escapeHtml(p.name)}">删除</button>
       </td>
@@ -553,19 +552,91 @@ async function deleteProject(pid, name) {
   }
 }
 
-function exportBase(pid) {
-  window.open(`api/projects/${pid}/export_base`, '_blank');
+// ── 导出选项（2026-08-26：验收日期过滤，单日可选）──
+
+/**
+ * 弹出导出选项对话框。
+ * @param {string} pid 项目 ID
+ * @param {Object} [opts] {county:boolean} 是否显示县选项（仅 base 导出有效）
+ * @returns {Promise<{date:string,county:string}|null>} date: YYYY-MM-DD（空=不过滤），
+ *   county: 县名（空=全部）；null=取消
+ */
+async function askExportOptions(pid, opts = {}) {
+  const root = qs('#modalRoot');
+  if (!root) return null;
+  // 县列表（仅 base）：请求失败静默降级为无县选项
+  let counties = [];
+  if (opts.county) {
+    try {
+      const r = await fetch(`api/projects/${pid}/counties`);
+      if (r.ok) counties = (await r.json()).counties || [];
+    } catch (e) { /* 网络异常降级 */ }
+  }
+  return new Promise(resolve => {
+    const countySel = counties.length ? `
+          <div style="font-size:12px;opacity:.75;margin-bottom:4px">县：仅导出该县的小班</div>
+          <select id="expCounty" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:6px;margin-bottom:10px;background:var(--bg-main,#fff);color:inherit">
+            <option value="">全部</option>
+            ${counties.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
+          </select>` : '';
+    root.innerHTML = `
+      <div class="modal-mask" data-x="cancel" style="position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100">
+        <div data-x="box" style="background:var(--bg-card,#fff);border-radius:10px;padding:18px 20px;width:min(340px,90vw);box-shadow:0 8px 30px rgba(0,0,0,.25)">
+          <div style="font-weight:600;margin-bottom:6px">导出选项</div>
+          ${countySel}
+          <div style="font-size:12px;opacity:.75;margin-bottom:4px">验收日期（单日）：仅导出该日期验收的小班；留空导出全部</div>
+          <input type="date" id="expInspectDate" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:6px;margin-bottom:14px;background:var(--bg-main,#fff);color:inherit">
+          <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button class="btn-admin-action" data-x="cancel">取消</button>
+            <button class="btn-admin-action" data-x="ok" style="background:#2563eb;color:#fff">导出</button>
+          </div>
+        </div>
+      </div>`;
+    const done = v => { root.innerHTML = ''; resolve(v); };
+    root.querySelectorAll('[data-x]').forEach(el => {
+      el.addEventListener('click', e => {
+        if (el.dataset.x === 'box') { e.stopPropagation(); return; }
+        done(el.dataset.x === 'ok'
+          ? { date: qs('#expInspectDate')?.value || '', county: qs('#expCounty')?.value || '' }
+          : null);
+      });
+    });
+  });
 }
 
-function exportSamples(pid) {
-  window.open(`api/projects/${pid}/export_samples`, '_blank');
+function _exportUrl(url, sel) {
+  if (!sel) return url;
+  const q = [];
+  if (sel.date) q.push(`inspect_date=${encodeURIComponent(sel.date)}`);
+  if (sel.county) q.push(`county=${encodeURIComponent(sel.county)}`);
+  return q.length ? `${url}${url.includes('?') ? '&' : '?'}${q.join('&')}` : url;
 }
 
-function exportTracks(pid, fmt) {
-  window.open(`api/projects/${pid}/export_tracks?fmt=${fmt || 'gpx'}`, '_blank');
+async function exportBase(pid) {
+  const sel = await askExportOptions(pid, { county: true });
+  if (sel === null) return;
+  window.open(_exportUrl(`api/projects/${pid}/export_base`, sel), '_blank');
 }
 
-// ── 分类下载（展开行：每分类样地 Excel 一个文件 + 轨迹 GPX zip）──
+async function exportSamples(pid) {
+  const sel = await askExportOptions(pid);
+  if (sel === null) return;
+  window.open(_exportUrl(`api/projects/${pid}/export_samples`, sel), '_blank');
+}
+
+async function exportSamplesSingle(pid, cat) {
+  const sel = await askExportOptions(pid);
+  if (sel === null) return;
+  const url = cat ? `api/projects/${pid}/export_samples?cat=${encodeURIComponent(cat)}&single=1`
+                  : `api/projects/${pid}/export_samples?single=1`;
+  window.open(_exportUrl(url, sel), '_blank');
+}
+
+function exportTracks(pid) {
+  window.open(`api/projects/${pid}/export_tracks`, '_blank');
+}
+
+// ── 分类下载（展开行：每分类样地 Excel 一个文件 + 轨迹 SHP zip）──
 
 function renderCatDownloadRow(p) {
   const cats = state.projectCategories[p.id];
@@ -580,9 +651,8 @@ function renderCatDownloadRow(p) {
         <b>${escapeHtml(c)}</b>
         <button class="btn-admin-action" data-action="cat-export-base" data-pid="${p.id}" data-cat="${escapeHtml(c)}">基本信息</button>
         <button class="btn-admin-action" data-action="cat-export-samples" data-pid="${p.id}" data-cat="${escapeHtml(c)}">样地打包</button>
-        <button class="btn-admin-action" data-action="cat-export-tracks" data-fmt="gpx" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹GPX</button>
-        <button class="btn-admin-action" data-action="cat-export-tracks" data-fmt="kml" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹KML</button>
-        <button class="btn-admin-action" data-action="cat-export-tracks" data-fmt="shp" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹SHP</button>
+        <button class="btn-admin-action" data-action="cat-export-samples-single" data-pid="${p.id}" data-cat="${escapeHtml(c)}">样地单文件</button>
+        <button class="btn-admin-action" data-action="cat-export-tracks" data-pid="${p.id}" data-cat="${escapeHtml(c)}">轨迹SHP</button>
       </div>`).join('');
   }
   return `<tr class="cat-dl-row"><td colspan="5"><div class="cat-dl-wrap">${inner}</div></td></tr>`;
@@ -605,16 +675,20 @@ async function toggleCatDownload(pid) {
   await loadProjectsTab();
 }
 
-function exportCatBase(pid, cat) {
-  window.open(`api/projects/${pid}/export_base?cat=${encodeURIComponent(cat)}`, '_blank');
+async function exportCatBase(pid, cat) {
+  const sel = await askExportOptions(pid, { county: true });
+  if (sel === null) return;
+  window.open(_exportUrl(`api/projects/${pid}/export_base?cat=${encodeURIComponent(cat)}`, sel), '_blank');
 }
 
-function exportCatSamples(pid, cat) {
-  window.open(`api/projects/${pid}/export_samples?cat=${encodeURIComponent(cat)}`, '_blank');
+async function exportCatSamples(pid, cat) {
+  const sel = await askExportOptions(pid);
+  if (sel === null) return;
+  window.open(_exportUrl(`api/projects/${pid}/export_samples?cat=${encodeURIComponent(cat)}`, sel), '_blank');
 }
 
-function exportCatTracks(pid, cat, fmt) {
-  window.open(`api/projects/${pid}/export_tracks?cat=${encodeURIComponent(cat)}&fmt=${fmt}`, '_blank');
+function exportCatTracks(pid, cat) {
+  window.open(`api/projects/${pid}/export_tracks?cat=${encodeURIComponent(cat)}`, '_blank');
 }
 
 async function viewMembers(pid) {
@@ -905,8 +979,11 @@ app.addEventListener('click', async (e) => {
     case 'proj-export-samples':
       exportSamples(t.dataset.pid);
       break;
+    case 'proj-export-samples-single':
+      exportSamplesSingle(t.dataset.pid);
+      break;
     case 'proj-export-tracks':
-      exportTracks(t.dataset.pid, t.dataset.fmt);
+      exportTracks(t.dataset.pid);
       break;
     case 'proj-cat-download':
       await toggleCatDownload(t.dataset.pid);
@@ -917,8 +994,11 @@ app.addEventListener('click', async (e) => {
     case 'cat-export-samples':
       exportCatSamples(t.dataset.pid, t.dataset.cat);
       break;
+    case 'cat-export-samples-single':
+      exportSamplesSingle(t.dataset.pid, t.dataset.cat);
+      break;
     case 'cat-export-tracks':
-      exportCatTracks(t.dataset.pid, t.dataset.cat, t.dataset.fmt || 'gpx');
+      exportCatTracks(t.dataset.pid, t.dataset.cat);
       break;
     case 'proj-delete':
       await deleteProject(t.dataset.pid, t.dataset.name);
