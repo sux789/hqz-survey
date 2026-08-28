@@ -57,10 +57,18 @@ def _derive_uint_with_digits(v):
 
 
 def _connect():
-    """获取数据库连接。"""
-    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    """获取数据库连接。
+
+    timeout=5（即 PRAGMA busy_timeout=5000）：生产 gunicorn -w 2 是多进程，
+    进程内 threading.Lock 挡不住跨进程并发写；SQLite 默认 busy_timeout=0，
+    两进程同时写会立即抛 database is locked（轨迹 15s 定时上传 × 多人打卡
+    场景偶发保存失败）。设 5 秒等待让 SQLite 自动排队重试。
+    WAL 模式下读不阻塞写，仅写-写需短暂排队，5s 余量足够。
+    """
+    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
