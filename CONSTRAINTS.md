@@ -100,6 +100,10 @@
 - G4 Actions 自动发布最新 APK 到 'latest' release，固定下载链接
 - G5 AndroidManifest 必须声明 <queries>（IMAGE_CAPTURE/VIDEO_CAPTURE），否则拍照静默回退文件选择器（2026-08-17 修复，commit e97326b）
 - G6 前端启动及拍照前做权限检查，拒绝时弹引导（AppPermissionsPlugin）
+- G7 iOS 打包（2026-08-26 起，build-ios.yml）：@capacitor/ios + @capacitor/geolocation（注入 WKWebView 定位，App 内 navigator.geolocation 使用）；只 GitHub Actions（macos-latest，runner 自带 Xcode+CocoaPods），不本地打包（本地仅装 CommandLineTools，无法 xcodebuild）
+- G8 ios/ 目录必须进版本控制（不 gitignore）；ios/.gitignore 只忽略 build/Pods/public/DerivedData 等产物
+- G9 iOS 定位权限（Info.plist）：NSLocationWhenInUseUsageDescription + NSLocationAlwaysAndWhenInUseUsageDescription + UIBackgroundModes location（前台+后台轨迹，App 内使用）；相机/相册权限字符串同样声明
+- G10 iOS 下载名优雅「iOS_验收APP.ipa」；真机安装需 Apple Developer 签名，secrets 注入（iOS_CERT_P12_B64/IOS_CERT_PASSWORD/IOS_PROVISIONING_B64/IOS_TEAM_ID）；未配签名时仅产出模拟器构建不红流水线；发布 tag=latest-ios 固定链接。桌面应用名保留「验收APP」（CFBundleDisplayName）
 
 ## H 部署 / 运维
 

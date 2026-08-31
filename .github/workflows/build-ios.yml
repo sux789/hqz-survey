@@ -1,0 +1,153 @@
+name: Build iOS
+
+# 2026-08-26 新增：iOS 壳（Capacitor，WebView 指向线上后端，App 内使用）。
+# 「验收APP」桌面名保留；下载产物统一优雅命名 iOS_验收APP（见 DownloadName）。
+# 真机安装需 Apple Developer 签名：签名凭据通过 secrets（iOS_*）注入；
+# 未配置签名时仅构建模拟器产物（可预览，不能真机安装），流水线不红。
+#
+# 需要签名时配置 secrets：
+#   iOS_CERT_P12_B64   — 分发证书 .p12 的 base64
+#   iOS_CERT_PASSWORD  — p12 密码
+#   iOS_PROVISIONING_B64 — 描述文件 .mobileprovision 的 base64
+#   iOS_TEAM_ID        — Apple 开发者团队 ID
+#（或改用 Apple 的 Provisioning Profile 全自动，见注释）
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DownloadName: iOS_验收APP   # 优雅下载名（真机 ipa）
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Capacitor deps (ios + geolocation)
+        run: npm install
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Sync iOS platform (uses committed ios/ project)
+        run: npx cap sync ios
+
+      - name: Install Pods (CapacitorGeolocation)
+        working-directory: ios/App
+        run: pod install
+
+      - name: Build app for iOS simulator (署名无关，保证流水线可过)
+        run: |
+          set -euxo pipefail
+          cd ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      # ── 真机 ipa（仅当配置了签名 secrets 时运行）──
+      - name: Configure signing & archive for device
+        if: secrets.IOS_CERT_P12_B64 != '' && secrets.IOS_PROVISIONING_B64 != ''
+        shell: bash
+        env:
+          CERT_P12: ${{ secrets.IOS_CERT_P12_B64 }}
+          CERT_PASS: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROVISION: ${{ secrets.IOS_PROVISIONING_B64 }}
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          set -euxo pipefail
+          KEYCHAIN=build.keychain
+          IFS='.' read -r a b c d <<< "$(ls -d /Applications/Xcode.app/Contents/Developer  2>/dev/null || echo 0.0.0.0)" || true
+
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          echo "$PROVISION" | base64 --decode > /tmp/profile.mobileprovision
+
+          # import & trust certificate
+          security create-keychain -p tmp_password "$KEYCHAIN" || true
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p tmp_password "$KEYCHAIN"
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$CERT_PASS" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k tmp_password "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+
+          # install provisioning profile
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(/usr/bin/security cms -D -i /tmp/profile.mobileprovision)" 2>/dev/null || true)
+          cp /tmp/profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+
+          EXPORT_PLIST=/tmp/ExportOptions.plist
+          cat > "$EXPORT_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>method</key><string>development</string>
+  <key>teamID</key><string>$TEAM_ID</string>
+  <key>signingStyle</key><string>manual</string>
+</dict></plist>
+PLIST
+
+          cd ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/App.xcarchive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            archive
+          xcodebuild \
+            -exportArchive \
+            -archivePath build/App.xcarchive \
+            -exportPath dist \
+            -exportOptionsPlist "$EXPORT_PLIST"
+
+      - name: Upload ipa (artifact)
+        if: secrets.IOS_CERT_P12_B64 != '' && secrets.IOS_PROVISIONING_B64 != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'iOS_验收APP-ipa'
+          path: ios/App/dist/*.ipa
+
+      # 发布到 Release（tag latest-ios，固定下载链接）
+      - name: Publish to GitHub Release
+        if: secrets.IOS_CERT_P12_B64 != '' && secrets.IOS_PROVISIONING_B64 != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IPA=$(find ios/App/dist -name '*.ipa' | head -1)
+          DEST="${DownloadName}.ipa"
+          cp "$IPA" "/tmp/$DEST"
+          gh release delete latest-ios --cleanup-tag -y || true
+          gh release create latest-ios "/tmp/$DEST" \
+            --title "验收APP（iOS 最新构建）" \
+            --notes "App 内运行，WebView 加载线上后端。需允许始终定位才可后台采集轨迹。下载 ${DownloadName}.ipa（开发签名）。" \
+            --prerelease
+
+      - name: Write summary
+        run: |
+          echo "## 🍎 iOS 下载" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ secrets.IOS_CERT_P12_B64 }}" != "" ]]; then
+            echo "真机 ipa（固定地址）：" >> "$GITHUB_STEP_SUMMARY"
+            echo "https://github.com/${{ github.repository }}/releases/download/latest-ios/${DownloadName}.ipa" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "未配置签名 secrets（iOS_CERT_P12_B64 / iOS_PROVISIONING_B64），本次仅产出模拟器构建。" >> "$GITHUB_STEP_SUMMARY"
+            echo "配置签名后会自动产出 ${DownloadName}.ipa 真机安装包并发布到 latest-ios release。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "构建：${{ github.sha }} @ $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
